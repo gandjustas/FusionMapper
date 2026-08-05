@@ -1,39 +1,50 @@
-FusionMapper Specification
+# FusionMapper Specification
 
-1. Project Goal
+## Project Goal
 
 FusionMapper is a .NET mapping library that performs fully automatic object-to-object mapping and LINQ projection generation without manual mapping profiles, manual maps, or explicit configuration.
 
 The library must:
 
-- Map objects automatically by convention.
-- Build `IQueryable<T>` projections automatically.
-- Support constructors, records, `required` members, and `init`-only members.
-- Map nested objects in acyclic object graphs by composing compiled expression trees.
-- Support flattening, for example:
-  - `source.Category.Name -> target.CategoryName`
-- Support automatic aggregate mapping for collections, for example:
-  - `source.Items.Count() -> target.ItemsCount`
-  - `source.Items.Sum(x => x.Price) -> target.ItemsPriceSum`
-- Rewrite calls to `Map().To<T>()` and `Project().To<T>()` inside expression trees into provider-translatable `.Select(...)` calls.
-- Use compiled expression-tree mapping for runtime object mapping.
-- Later, use a Roslyn source generator and interceptors to generate compile-time implementations.
+1. Map objects automatically by convention.
+2. Build `IQueryable<T>` projections automatically.
+3. Support constructors, records, `required` members, and `init`-only members.
+4. Map nested objects in acyclic object graphs by composing compiled expression trees.
+5. Support flattening, for example:
+
+   ```csharp
+   source.Category.Name -> target.CategoryName
+   ```
+
+6. Support automatic aggregate and terminal collection mapping, for example:
+
+   ```csharp
+   source.Items.Count() -> target.ItemsCount
+   source.Items.Sum(x => x.Price) -> target.ItemsPriceSum
+   source.Items.First() -> target.ItemsFirst
+   source.Items.Select(x => x.Name).First() -> target.ItemsNameFirst
+   source.Order.Items.First().Name -> target.OrderItemsFirstName
+   ```
+
+7. Rewrite calls to `Map().To<T>()` and `Project().To<T>()` inside expression trees into provider-translatable `.Select(...)` calls.
+8. Use compiled expression-tree mapping for runtime object mapping.
+9. Later, use a Roslyn source generator and interceptors to generate compile-time implementations.
 
 The runtime mapping execution model must satisfy the following constraints:
 
-- Mapping must be based on compiled expression trees.
-- The compiled mapping delegate must not use runtime reflection during mapping execution.
-- Reflection may be used only while discovering members and building the mapping expression, not while executing the compiled mapping delegate.
-- Recursive type mapping is not supported.
-- Cyclic object graphs are not supported.
-- If a recursive or cyclic type/object graph is detected, the mapper must throw `MappingException`.
-- Identity resolution is not supported. The mapper does not guarantee that the same source object instance maps to the same target object instance.
-- There is no `MappingContext`, visited-object tracker, reference tracker, or per-operation identity cache.
+1. Mapping must be based on compiled expression trees.
+2. The compiled mapping delegate must not use runtime reflection during mapping execution.
+3. Reflection may be used only while discovering members and building the mapping expression, not while executing the compiled mapping delegate.
+4. Recursive type mapping is not supported.
+5. Cyclic object graphs are not supported.
+6. If a recursive or cyclic type/object graph is detected, the mapper must throw `MappingException`.
+7. Identity resolution is not supported.
+8. There is no `MappingContext`, visited-object tracker, reference tracker, or per-operation identity cache.
+9. The project must not require the user to define mapping profiles or manual mapping rules in version 1.
 
-The project must not require the user to define mapping profiles or manual mapping rules in version 1.
+---
 
-
-2. Technology Stack
+## Technology Stack
 
 Language:
 
@@ -74,8 +85,9 @@ Source generation may use:
 - Interceptors, where supported.
 - Compile-time diagnostics.
 
+---
 
-3. Namespaces
+## Namespaces
 
 Primary library namespace:
 
@@ -89,8 +101,9 @@ Test namespace:
 namespace FusionMapper.Tests;
 ```
 
+---
 
-4. Current Public Skeleton
+## Current Public Skeleton
 
 The current public API skeleton is:
 
@@ -116,8 +129,6 @@ public sealed class MappingException : Exception
 ```
 
 ```csharp
-namespace FusionMapper;
-
 public static class FusionMapper
 {
     public static FusionSource<TSource> Map<TSource>(this TSource source)
@@ -125,40 +136,68 @@ public static class FusionMapper
 
     public static FusionProjection<TSource> Project<TSource>(this IQueryable<TSource> source)
         => new(source);
+
+    static readonly ConcurrentDictionary<(Type Source, Type Target), Delegate> MapDelegates = new();
+    static readonly ConcurrentDictionary<(Type Source, Type Target), Delegate> MapToExistingDelegates = new();
+
+    internal static TTarget Map<TSource, TTarget>(TSource source)
+    {
+        var del = MapDelegates.GetOrAdd((typeof(TSource), typeof(TTarget)), _ => CompileMapping<TSource, TTarget>());
+        var func = (Func<TSource, TTarget>)del;
+        return func(source);
+    }
+
+    internal static TTarget Map<TSource, TTarget>(TSource source, TTarget target)
+    {
+        if (source == null)
+        {
+            ArgumentNullException.ThrowIfNull(target);
+            return target;
+        }
+        ArgumentNullException.ThrowIfNull(target);
+
+        var del = MapToExistingDelegates.GetOrAdd((typeof(TSource), typeof(TTarget)), _ => CompileMappingToExisting<TSource, TTarget>());
+        var action = (Action<TSource, TTarget>)del;
+        action(source, target);
+        return target;
+    }
+
+    internal static IQueryable<TTarget> Project<TSource, TTarget>(IQueryable<TSource> source)
+    {
+        // Проекции будут реализованы в Milestone 3
+        throw new NotImplementedException("FusionMapper runtime projection engine is not implemented yet.");
+    }
+
+
+    static Delegate CompileMapping<TSource, TTarget>()
+    {
+        var sourceParam = Expression.Parameter(typeof(TSource), "source");
+        var body = MappingBuilder.BuildCreationExpression<TSource, TTarget>(sourceParam);
+        var lambda = Expression.Lambda<Func<TSource, TTarget>>(body, sourceParam);
+        return lambda.Compile();
+    }
+
+    static Delegate CompileMappingToExisting<TSource, TTarget>()
+    {
+        var sourceParam = Expression.Parameter(typeof(TSource), "source");
+        var targetParam = Expression.Parameter(typeof(TTarget), "target");
+        var body = MappingBuilder.BuildAssignmentExpression<TSource, TTarget>(sourceParam, targetParam);
+        var lambda = Expression.Lambda<Action<TSource, TTarget>>(body, sourceParam, targetParam);
+        return lambda.Compile();
+    }
+
 }
 
 public readonly struct FusionSource<TSource>(TSource Value)
 {
-    public TTarget To<TTarget>()
-        => FusionEngine.Map<TSource, TTarget>(Value);
-
-    public TTarget To<TTarget>(TTarget target)
-        => FusionEngine.Map(Value, target);
+    public TTarget To<TTarget>() => FusionMapper.Map<TSource, TTarget>(Value);
+    public TTarget To<TTarget>(TTarget target) => FusionMapper.Map(Value, target);
 }
 
 public readonly struct FusionProjection<TSource>(IQueryable<TSource> Value)
 {
-    public IQueryable<TTarget> To<TTarget>()
-        => FusionEngine.Project<TSource, TTarget>(Value);
+    public IQueryable<TTarget> To<TTarget>() => FusionMapper.Project<TSource, TTarget>(Value);
 }
-```
-
-```csharp
-namespace FusionMapper;
-
-internal static class FusionEngine
-{
-    public static TTarget Map<TSource, TTarget>(TSource source)
-        => throw new NotImplementedException(
-            "FusionMapper runtime object mapping engine is not implemented yet.");
-
-    public static TTarget Map<TSource, TTarget>(TSource source, TTarget target)
-        => throw new NotImplementedException(
-            "FusionMapper runtime object mapping engine is not implemented yet.");
-
-    public static IQueryable<TTarget> Project<TSource, TTarget>(IQueryable<TSource> source)
-        => throw new NotImplementedException(
-            "FusionMapper runtime object mapping engine is not implemented yet.");
 }
 ```
 
@@ -166,10 +205,11 @@ The implementation must preserve this public fluent API.
 
 The internal engine may be implemented using compiled expression trees and cached mapping delegates. It must not rely on runtime reflection during mapping execution.
 
+---
 
-5. Authoritative API Behavior
+## Authoritative API Behavior
 
-5.1. Object Mapping
+### 5.1. Object Mapping
 
 This call:
 
@@ -191,7 +231,9 @@ Both forms must also support collection mapping where applicable.
 
 Object mapping must be executed through compiled expression-tree delegates.
 
-5.2. Query Projection
+---
+
+### 5.2. Query Projection
 
 This call:
 
@@ -228,7 +270,9 @@ source => SomeMapper.Map(source)
 
 The bad shape is not acceptable for `IQueryable` projection.
 
-5.3. Expression Tree Rewriting
+---
+
+### 5.3. Expression Tree Rewriting
 
 For expression rewriting, the intended API is:
 
@@ -259,17 +303,17 @@ internal static IQueryable<TTarget> Rewrite<TSource, TTarget>(IQueryable<TTarget
 
 Behavior:
 
-- Take `query.Expression`.
-- Visit the expression tree.
-- Replace supported FusionMapper calls with translatable LINQ calls.
-- Create a new query using:
+1. Take `query.Expression`.
+2. Visit the expression tree.
+3. Replace supported FusionMapper calls with translatable LINQ calls.
+4. Create a new query using:
 
-```csharp
-query.Provider.CreateQuery<TTarget>(newExpression)
-```
+   ```csharp
+   query.Provider.CreateQuery<TTarget>(newExpression)
+   ```
 
-- Do not mutate the original expression.
-- Return the original query if no rewrite is needed.
+5. Do not mutate the original expression.
+6. Return the original query if no rewrite is needed.
 
 Supported rewrite targets:
 
@@ -333,8 +377,9 @@ var rewritten = source
 
 The incorrect pattern does not rewrite `query`.
 
+---
 
-6. Exception Rules
+## Exception Rules
 
 Use only:
 
@@ -348,17 +393,17 @@ Do not introduce another default exception type for mapping errors.
 
 Throw `MappingException` when:
 
-- A required target member cannot be mapped.
-- A constructor parameter cannot be mapped.
-- Member resolution is ambiguous.
-- A recursive type graph is detected.
-- A cyclic object graph is detected or cannot be safely represented.
-- A recursive projection cannot be safely built.
-- A target type has no usable constructor.
-- A collection mapping is unsupported.
-- An expression tree contains an unsupported FusionMapper call.
-- Mapping into an immutable target is impossible.
-- A mapping would require identity resolution or cycle tracking to complete safely.
+1. A required target member cannot be mapped.
+2. A constructor parameter cannot be mapped.
+3. Member resolution is ambiguous.
+4. A recursive type graph is detected.
+5. A cyclic object graph is detected or cannot be safely represented.
+6. A recursive projection cannot be safely built.
+7. A target type has no usable constructor.
+8. A collection mapping is unsupported.
+9. An expression tree contains an unsupported FusionMapper call.
+10. Mapping into an immutable target is impossible.
+11. A mapping would require identity resolution or cycle tracking to complete safely.
 
 Exception messages should include:
 
@@ -386,25 +431,24 @@ Recursive and cyclic type graphs are not supported.
 
 For null argument errors in public APIs, standard .NET exceptions such as `ArgumentNullException` are acceptable, but mapping-resolution failures must use `MappingException`.
 
+---
 
-7. Mapping Rules
+## Mapping Rules
 
-7.1. General Rules
+### 7.1. General Rules
 
-Mapping is automatic.
+1. Mapping is automatic.
+2. The mapper must not require:
+   - Mapping profiles.
+   - Manual member configuration.
+   - Explicit type maps.
+   - Attributes in version 1.
+3. If mapping is impossible, throw `MappingException`.
+4. Do not silently skip required members.
 
-The mapper must not require:
+---
 
-- Mapping profiles.
-- Manual member configuration.
-- Explicit type maps.
-- Attributes in version 1.
-
-If mapping is impossible, throw `MappingException`.
-
-Do not silently skip required members.
-
-7.2. Source Members
+### 7.2. Source Members
 
 Source members are public instance:
 
@@ -421,9 +465,11 @@ Supported source members include:
 - Collection properties.
 - Constructor parameters, when mapping from records or immutable types if exposed as properties.
 
-Methods are not general source members, except for collection aggregate translation rules described later.
+Methods are not general source members, except for collection aggregate and terminal operator translation rules described later.
 
-7.3. Target Members
+---
+
+### 7.3. Target Members
 
 Target members include:
 
@@ -442,77 +488,316 @@ The mapper must support:
 - Types with `required` members.
 - Types with `init`-only members.
 
+---
 
-8. Member Matching Algorithm
+## Member Matching Algorithm
 
-For each target member, resolve a source expression in the following order.
+For each target member, the mapper resolves a source expression using recursive suffix-based resolution.
 
-8.1. Exact Match
+The target member name is treated as a suffix that must be consumed by traversing source members, collection element members, and collection operations.
+
+Resolution is performed in two phases:
+
+1. Exact phase.
+2. Case-insensitive phase.
+
+In the exact phase, member names are matched using ordinal exact comparison.
+
+If the exact phase does not produce a completed candidate, the mapper repeats member matching using case-insensitive ordinal comparison.
+
+Collection operation names are always matched exactly, even during the case-insensitive phase.
+
+---
+
+### 8.1. Exact Match
 
 Exact ordinal name match:
 
-```text
+```csharp
 source.Name -> target.Name
 ```
 
-8.2. Case-Insensitive Match
+---
+
+### 8.2. Case-Insensitive Match
 
 If no exact match exists, use case-insensitive ordinal comparison:
 
-```text
+```csharp
 source.name -> target.Name
 source.NAME -> target.Name
 ```
 
-8.3. Flattening
+Case-insensitive matching applies to ordinary source member names and prefix flattening candidates.
 
-If no direct match exists, attempt flattening.
+It does not apply to collection operation names such as:
 
-Target member names are split by:
+- `Count`
+- `Any`
+- `Sum`
+- `Average`
+- `Max`
+- `Min`
+- `All`
+- `First`
+- `FirstOrDefault`
+- `Last`
+- `LastOrDefault`
+
+These operation names must match exactly.
+
+---
+
+### 8.3. Recursive Suffix Flattening
+
+If no direct match exists, attempt recursive suffix flattening.
+
+Target member names are effectively split by:
 
 - PascalCase boundaries.
 - Underscores.
 
+However, the resolver does not need to pre-tokenize the whole name.
+
+Instead, it passes the remaining suffix recursively.
+
 Example target member:
 
-```text
+```csharp
 CategoryName
-```
-
-Split into:
-
-```text
-Category, Name
 ```
 
 Candidate source path:
 
-```text
+```csharp
 source.Category.Name
 ```
 
 Another example:
 
-```text
+```csharp
 OrderTotalAmount
 ```
 
 Candidate source path:
 
-```text
+```csharp
 source.Order.Total.Amount
 ```
 
 Flattening rules:
 
-- Prefer exact segment matches.
-- Fall back to case-insensitive segment matches.
-- Limit flattening depth to a reasonable value, recommended max depth: 4.
-- Prefer shorter paths when scores are otherwise equal.
-- Throw `MappingException` on ambiguous equal-score candidates.
+1. Prefer exact segment matches.
+2. Fall back to case-insensitive segment matches if exact resolution fails.
+3. There is no fixed artificial flattening depth limit.
+4. Resolution terminates because each successful step consumes part of the target suffix.
+5. Prefer shorter paths when scores are otherwise equal.
+6. Throw `MappingException` on ambiguous equal-score candidates.
+7. If a candidate path cannot consume the full suffix, the resolver must backtrack and try another candidate.
 
+The previous recommendation to limit flattening depth to 4 is removed.
 
-9. Matching Priority
+---
+
+### 8.4. Recursive Suffix Resolution Behavior
+
+At each resolution step, the mapper has:
+
+- current source type;
+- current source expression;
+- remaining target suffix.
+
+The resolver should behave as follows:
+
+1. If the remaining suffix is empty, the current source expression is resolved.
+
+2. Try to resolve the whole remaining suffix as a direct member of the current source type.
+
+3. If the current source type is `Nullable<T>`, unwrap it and continue resolution against `T` using null-safe access.
+
+4. Try prefix member resolution:
+   - find source members whose names match the beginning of the remaining suffix;
+   - cut the matched prefix from the suffix;
+   - recurse into the member type with the remaining suffix;
+   - if recursion fails, backtrack and try another member.
+
+5. If the current source type is a collection type `IEnumerable<T>`, try collection operation resolution:
+   - operation as prefix;
+   - operation as suffix;
+   - element property plus operation candidates.
+
+6. If no exact candidate resolves the full suffix, repeat ordinary member resolution using case-insensitive matching.
+
+7. Collection operation names remain exact in both phases.
+
+---
+
+### 8.5. Collection Operation as Prefix
+
+If the current source type is a collection type and the remaining suffix starts with an operation name, the mapper may apply that operation to the collection.
+
+Example:
+
+```csharp
+target.CollectionFirstDateYear
+```
+
+Resolution:
+
+```text
+CollectionFirstDateYear
+```
+
+Find source collection:
+
+```csharp
+source.Collection
+```
+
+Remaining suffix:
+
+```text
+FirstDateYear
+```
+
+Operation prefix:
+
+```text
+First
+```
+
+Remaining suffix after operation:
+
+```text
+DateYear
+```
+
+Resulting mapping:
+
+```csharp
+source.Collection.First().Date.Year
+```
+
+The resolver then continues recursively from the result type of the operation.
+
+---
+
+### 8.6. Collection Operation as Suffix
+
+If the current source type is a collection type and the remaining suffix ends with an operation name, the mapper may treat the preceding suffix as a selector path on the collection element type.
+
+Example:
+
+```csharp
+target.CollectionDateFirst
+```
+
+Resolution:
+
+```text
+CollectionDateFirst
+```
+
+Find source collection:
+
+```csharp
+source.Collection
+```
+
+Remaining suffix:
+
+```text
+DateFirst
+```
+
+Operation suffix:
+
+```text
+First
+```
+
+Selector suffix:
+
+```text
+Date
+```
+
+Resulting mapping:
+
+```csharp
+source.Collection.Select(x => x.Date).First()
+```
+
+Another example:
+
+```csharp
+target.ItemsValueSum
+```
+
+Resulting mapping:
+
+```csharp
+source.Items.Sum(x => x.Value)
+```
+
+---
+
+### 8.7. Element Property and Operation Candidate Generation
+
+If the source type is `IEnumerable<T>` and the remaining suffix is not resolved by direct members of the collection type, the mapper may generate candidates by combining:
+
+- readable members of the element type `T`;
+- supported collection operation names.
+
+This is a Cartesian-style candidate search:
+
+```text
+member(T) + operation
+```
+
+Example:
+
+```csharp
+target.CollectionDateFirst
+```
+
+After resolving `source.Collection`, the remaining suffix is:
+
+```text
+DateFirst
+```
+
+The collection itself has no member named `Date` or `First`.
+
+The element type `T` has a member:
+
+```csharp
+Date
+```
+
+Supported operation:
+
+```csharp
+First
+```
+
+Concatenated candidate:
+
+```text
+DateFirst
+```
+
+It matches the remaining suffix, so the mapping becomes:
+
+```csharp
+source.Collection.Select(x => x.Date).First()
+```
+
+If there is a remaining suffix after the operation, resolution continues recursively from the operation result type.
+
+---
+
+## Matching Priority
 
 Recommended scoring model:
 
@@ -520,40 +805,55 @@ Recommended scoring model:
 |---|---:|
 | Exact direct member | 1000 |
 | Exact constructor parameter match | 950 |
-| Case-insensitive direct member | 900 |
-| Flattening with exact segments | 800 |
-| Flattening with case-insensitive segments | 700 |
-| Aggregate convention | 500 |
+| Exact flattening / prefix path | 900 |
+| Exact collection aggregate or terminal convention | 850 |
+| Case-insensitive direct member | 800 |
+| Case-insensitive flattening / prefix path | 700 |
 | Fallback type conversion | 100 |
 
 If multiple candidates have the same score, throw `MappingException`.
 
 Do not randomly select a candidate.
 
+Exact collection conventions are considered before falling back to case-insensitive ordinary member matching.
 
-10. Constructor Mapping
+---
 
-10.1. Constructor Selection
+## Constructor Mapping
+
+### 10.1. Constructor Selection
 
 The mapper must choose a constructor automatically.
 
+Constructor evaluation is performed as a single plan-building loop per candidate constructor.
+
+For each candidate constructor:
+
+1. Attempt to map all constructor parameters from the source.
+2. If all constructor parameters can be mapped, attempt to initialize settable and init-only target members.
+3. Skip target members whose names match already bound constructor parameter names.
+4. If the constructor does not have `SetsRequiredMembersAttribute`, verify that all required members are satisfied.
+5. A constructor is usable only if the whole plan succeeds.
+
 Rules:
 
-- If the target has a public parameterless constructor and all required members can be initialized through member bindings, it may be used.
-- For records, prefer the primary constructor.
-- Otherwise, choose the public constructor with the highest number of bindable parameters.
-- All required constructor parameters must be bindable.
-- If multiple constructors have identical bindability scores, throw `MappingException`.
+1. If the target has a public parameterless constructor and all required members can be initialized through member bindings, it may be used.
+2. For records, prefer the primary constructor.
+3. Otherwise, choose the public constructor with the highest number of bindable parameters.
+4. All required constructor parameters must be bindable.
+5. If multiple usable constructors have identical bindability scores, throw `MappingException`.
 
-10.2. Constructor Parameter Matching
+---
+
+### 10.2. Constructor Parameter Matching
 
 Constructor parameter names are matched against source members.
 
 Matching order:
 
-- Exact ordinal match, ignoring parameter case conventions.
-- Case-insensitive match.
-- Flattening match.
+1. Exact ordinal match, ignoring parameter case conventions.
+2. Case-insensitive match.
+3. Flattening match.
 
 Example:
 
@@ -582,8 +882,33 @@ new ProductDto(
 
 If a constructor parameter is required and cannot be mapped, throw `MappingException`.
 
+---
 
-11. Required Members
+### 10.3. Members Already Satisfied by Constructor Parameters
+
+When a constructor parameter has been bound, target members with the same name must not be initialized again.
+
+Name comparison for this purpose is case-insensitive.
+
+Example:
+
+```csharp
+public class Target
+{
+    public string Name { get; set; }
+
+    public Target(string name)
+    {
+        Name = name;
+    }
+}
+```
+
+If constructor parameter `name` is bound from `source.Name`, the member `Name` must not be assigned again during object initialization.
+
+---
+
+## Required Members
 
 The mapper must respect C# `required` members.
 
@@ -595,11 +920,11 @@ Source generation should use Roslyn symbol information, such as property require
 
 Rules:
 
-- Every required target member must be mapped.
-- A required member may be satisfied by:
-  - A constructor parameter.
-  - A member initialization.
-- If a required member cannot be satisfied, throw `MappingException`.
+1. Every required target member must be mapped.
+2. A required member may be satisfied by:
+   - A constructor parameter.
+   - A member initialization.
+3. If a required member cannot be satisfied, throw `MappingException`.
 
 Example failure:
 
@@ -612,8 +937,9 @@ public class RequiredTarget
 
 If source has no member that can map to `Name`, throw.
 
+---
 
-12. Init-Only Members
+## Init-Only Members
 
 The mapper must support init-only members during object creation.
 
@@ -639,8 +965,9 @@ new InitTarget
 
 Init-only members must not be set when mapping into an existing target object.
 
+---
 
-13. Mapping Into Existing Target
+## Mapping Into Existing Target
 
 This API:
 
@@ -652,19 +979,19 @@ must update an existing target instance.
 
 Rules:
 
-- The target constructor is not invoked.
-- Writable properties and fields may be updated.
-- Init-only members must not be updated.
-- Read-only non-collection members must not be updated.
-- Required members are not revalidated because the target already exists.
-- If `target` is null, throw `ArgumentNullException`.
-- No `MappingContext`, identity tracker, or visited-object tracker is used.
+1. The target constructor is not invoked.
+2. Writable properties and fields may be updated.
+3. Init-only members must not be updated.
+4. Read-only non-collection members must not be updated.
+5. Required members are not revalidated because the target already exists.
+6. If `target` is null, throw `ArgumentNullException`.
+7. No `MappingContext`, identity tracker, or visited-object tracker is used.
 
 Collection behavior:
 
-- If the target collection property is writable, assign a new mapped collection when appropriate.
-- If the target collection property is read-only but the collection instance is mutable, clear and repopulate it.
-- If the collection cannot be assigned or mutated, throw `MappingException`.
+1. If the target collection property is writable, assign a new mapped collection when appropriate.
+2. If the target collection property is read-only but the collection instance is mutable, clear and repopulate it.
+3. If the collection cannot be assigned or mutated, throw `MappingException`.
 
 Example:
 
@@ -677,15 +1004,16 @@ public class OrderTarget
 
 The mapper should clear and repopulate `Items`.
 
+---
 
-14. Null Handling
+## Null Handling
 
-14.1. Null Source
+### 14.1. Null Source
 
 If the source object is null:
 
-- If the target type is a reference type or nullable value type, return `default`.
-- If the target type is a non-nullable value type, throw `MappingException`.
+1. If the target type is a reference type or nullable value type, return `default`.
+2. If the target type is a non-nullable value type, throw `MappingException`.
 
 Example:
 
@@ -700,7 +1028,9 @@ Expected:
 result == null
 ```
 
-14.2. Null Nested Members
+---
+
+### 14.2. Null Nested Members
 
 For projections, nested member access must be null-safe.
 
@@ -718,8 +1048,66 @@ source.Category != null ? source.Category.Name : null
 
 For runtime object mapping, normal null-safe traversal is expected.
 
+---
 
-15. Nested Object Mapping and Recursive Types
+### 14.3. Null-Safe Flattening and Nullable Value Types
+
+If a flattened source path contains a null reference before reaching a non-nullable value-type member, and the target member is nullable, the mapper must produce `null`.
+
+It must not coerce the missing value into `0`, `false`, or another default value of the underlying type.
+
+Example:
+
+```csharp
+public class Source
+{
+    public Level2Source? Level2 { get; set; }
+}
+
+public class Level2Source
+{
+    public Level3Source? Level3 { get; set; }
+}
+
+public class Level3Source
+{
+    public Level4Source? Level4 { get; set; }
+}
+
+public class Level4Source
+{
+    public int Value { get; set; }
+}
+
+public class Target
+{
+    public int? Level2Level3Level4Value { get; set; }
+}
+```
+
+If:
+
+```csharp
+source.Level2 == null
+```
+
+or:
+
+```csharp
+source.Level2.Level3.Level4 == null
+```
+
+then:
+
+```csharp
+target.Level2Level3Level4Value == null
+```
+
+If the target member is non-nullable, runtime mapping should throw `MappingException` when the resolved source value is null.
+
+---
+
+## Nested Object Mapping and Recursive Types
 
 The mapper must map nested objects by composing expression trees, provided the type graph is acyclic.
 
@@ -793,10 +1181,11 @@ This is not recursive. The same `AddressSource -> AddressTarget` mapping may be 
 
 A repeated type pair is an error only when it appears in its own mapping construction path, forming a recursive cycle.
 
+---
 
-16. Cycles, Identity Resolution, and Mapping Context
+## Cycles, Identity Resolution, and Mapping Context
 
-16.1. Cyclic and Recursive Type Graphs
+### 16.1. Cyclic and Recursive Type Graphs
 
 The mapper must not cause stack overflow on cyclic object graphs.
 
@@ -818,7 +1207,9 @@ Path: Category -> Parent -> Category.
 Recursive and cyclic type graphs are not supported.
 ```
 
-16.2. Runtime Cyclic Object Graphs
+---
+
+### 16.2. Runtime Cyclic Object Graphs
 
 Cyclic object graphs are not supported.
 
@@ -828,7 +1219,9 @@ If a cyclic object graph cannot be represented without cycle tracking or identit
 
 Because recursive type graphs are rejected during mapping construction, many cyclic scenarios are rejected before runtime mapping execution.
 
-16.3. No Identity Resolution
+---
+
+### 16.3. No Identity Resolution
 
 Identity resolution is not supported.
 
@@ -836,25 +1229,15 @@ The mapper does not track already mapped source objects.
 
 The mapper does not guarantee that:
 
-- The same source instance maps to the same target instance.
-- Multiple references to the same source object preserve reference equality after mapping.
-- Object identity is preserved across the mapped graph.
+1. The same source instance maps to the same target instance.
+2. Multiple references to the same source object preserve reference equality after mapping.
+3. Object identity is preserved across the mapped graph.
 
 If the same source object is referenced multiple times in an acyclic graph, it may be mapped independently each time.
 
-Example:
+---
 
-```csharp
-public class OrderSource
-{
-    public CustomerSource BillingCustomer { get; set; }
-    public CustomerSource ShippingCustomer { get; set; }
-}
-```
-
-If `BillingCustomer` and `ShippingCustomer` reference the same source instance, the mapper is not required to produce the same `CustomerTarget` instance for both target members.
-
-16.4. No MappingContext
+### 16.4. No MappingContext
 
 There must be no `MappingContext`.
 
@@ -867,8 +1250,9 @@ The mapper must not use:
 
 Cached compiled delegates and projection expressions must be stateless or safe for concurrent use without per-operation state.
 
+---
 
-17. Collection Mapping
+## Collection Mapping
 
 The mapper must support mapping between collection types.
 
@@ -894,15 +1278,15 @@ Supported target collection types include:
 
 Materialization rules:
 
-- For arrays, use `ToArray()`.
-- For list-like and read-only collection interfaces, use `ToList()` unless a better target-specific materialization exists.
-- For `IEnumerable<T>`, the mapper may leave the projection as `Select(...)` or materialize if required by the target.
+1. For arrays, use `ToArray()`.
+2. For list-like and read-only collection interfaces, use `ToList()` unless a better target-specific materialization exists.
+3. For `IEnumerable<T>`, the mapper may leave the projection as `Select(...)` or materialize if required by the target.
 
 Element mapping must follow the same acyclic mapping rules as object mapping.
 
 Example:
 
-```text
+```csharp
 List<ItemSource> -> List<ItemTarget>
 ```
 
@@ -928,16 +1312,17 @@ This must throw `MappingException`.
 
 Null collections:
 
-- If source collection is null and target collection is nullable, map to null.
-- If target collection is non-nullable, behavior may be target creation or exception depending on construction requirements.
-- Prefer predictable behavior and throw if impossible.
+1. If source collection is null and target collection is nullable, map to null.
+2. If target collection is non-nullable, behavior may be target creation or exception depending on construction requirements.
+3. Prefer predictable behavior and throw if impossible.
 
+---
 
-18. Aggregate Collection Mapping
+## Aggregate and Terminal Collection Mapping
 
-The mapper supports convention-based aggregate mapping.
+The mapper supports convention-based aggregate and terminal collection mapping.
 
-Supported aggregate suffixes:
+Supported operation names:
 
 - `Count`
 - `Sum`
@@ -945,10 +1330,17 @@ Supported aggregate suffixes:
 - `Max`
 - `Min`
 - `Any`
+- `All`
+- `First`
+- `FirstOrDefault`
+- `Last`
+- `LastOrDefault`
 
-`All` is not supported automatically in version 1 because it requires a predicate.
+Operation names are matched exactly and are case-sensitive.
 
-18.1. Count
+---
+
+### 18.1. Count
 
 Target:
 
@@ -968,7 +1360,9 @@ Mapping:
 ItemsCount = source.Items.Count()
 ```
 
-18.2. Any
+---
+
+### 18.2. Any
 
 Target:
 
@@ -982,7 +1376,9 @@ Mapping:
 ItemsAny = source.Items.Any()
 ```
 
-18.3. Sum / Average / Max / Min
+---
+
+### 18.3. Sum / Average / Max / Min
 
 For numeric collections:
 
@@ -1033,66 +1429,192 @@ Mapping:
 ItemsValueSum = source.Items.Sum(x => x.Value)
 ```
 
-Aggregate parsing rules:
+---
 
-- The last segment is the operation.
-- The preceding segment or segments identify the source collection.
-- Remaining middle segments identify the selector path.
-- Prefer exact matches.
-- Fall back to case-insensitive matches.
-- Throw `MappingException` when the aggregate target cannot be resolved unambiguously.
+### 18.4. All
 
+`All` is supported only when a boolean predicate can be inferred automatically.
 
-19. Type Conversion Rules
+Supported forms:
+
+```csharp
+target.FlagsAll <- source.Flags.All(x => x)
+```
+
+when `source.Flags` is a collection of `bool`.
+
+And:
+
+```csharp
+target.ItemsActiveAll <- source.Items.All(x => x.Active)
+```
+
+when `Active` resolves to `bool` or `bool?`.
+
+For `bool?`, the mapper may normalize the predicate as:
+
+```csharp
+x.Active == true
+```
+
+Arbitrary predicate expressions for `All` are not supported in version 1.
+
+If `All` cannot infer a boolean predicate, the candidate is invalid.
+
+---
+
+### 18.5. First / FirstOrDefault / Last / LastOrDefault
+
+The mapper supports terminal collection conventions for:
+
+- `First`
+- `FirstOrDefault`
+- `Last`
+- `LastOrDefault`
+
+Examples:
+
+```csharp
+target.ItemsFirst <- source.Items.First()
+target.ItemsFirstOrDefault <- source.Items.FirstOrDefault()
+target.ItemsLast <- source.Items.Last()
+target.ItemsLastOrDefault <- source.Items.LastOrDefault()
+```
+
+With selector:
+
+```csharp
+target.ItemsNameFirst <- source.Items.Select(x => x.Name).First()
+target.ItemsNameFirstOrDefault <- source.Items.Select(x => x.Name).FirstOrDefault()
+target.ItemsValueLast <- source.Items.Select(x => x.Value).Last()
+```
+
+With deep flattening:
+
+```csharp
+target.OrderItemsFirst <- source.Order.Items.First()
+target.OrderItemsFirstName <- source.Order.Items.First().Name
+target.OrderItemsNameFirst <- source.Order.Items.Select(x => x.Name).First()
+```
+
+With nested member after terminal operator:
+
+```csharp
+target.CollectionFirstDateYear <- source.Collection.First().Date.Year
+```
+
+With selector before terminal operator:
+
+```csharp
+target.CollectionDateFirst <- source.Collection.Select(x => x.Date).First()
+```
+
+---
+
+### 18.6. Aggregate and Terminal Parsing Rules
+
+Aggregate and terminal parsing follows the recursive suffix model.
+
+Rules:
+
+1. Exact direct members win over collection conventions.
+2. Collection operation names are matched exactly.
+3. An operation may appear:
+   - as a suffix;
+   - as a prefix before a remaining member path;
+   - as part of an element member plus operation candidate.
+4. Selector paths may appear before or after terminal operators depending on the target name shape.
+5. If a candidate cannot fully resolve the remaining suffix, the resolver must backtrack.
+6. Prefer exact matches.
+7. Fall back to case-insensitive ordinary member matches.
+8. Do not apply case-insensitive matching to operation names.
+9. Throw `MappingException` when the aggregate or terminal target cannot be resolved unambiguously.
+
+---
+
+### 18.7. Null and Empty Collection Behavior
+
+Automatic collection conventions should behave predictably.
+
+Recommended runtime behavior:
+
+| Operation | Source collection is null | Source collection is empty |
+|---|---:|---:|
+| `Count` | `0` | `0` |
+| `Any` | `false` | `false` |
+| `All` | `false` | `true` |
+| `Sum` | default | default |
+| `Average` | default | default |
+| `Max` | default | default |
+| `Min` | default | default |
+| `First` | default | default |
+| `FirstOrDefault` | default | default |
+| `Last` | default | default |
+| `LastOrDefault` | default | default |
+
+For reference types, `default` means `null`.
+
+For non-nullable value types, `default` means the CLR default, for example `0` for `decimal` or `int`.
+
+If the target member is nullable and the resolved source path is null, the mapper should produce `null` where possible.
+
+---
+
+## Type Conversion Rules
 
 Version 1 should support at least:
 
-- Same type assignment.
-- Assignable reference conversions.
-- Nullable wrapping:
+1. Same type assignment.
+2. Assignable reference conversions.
+3. Nullable wrapping:
 
-```text
-int -> int?
-```
+   ```csharp
+   int -> int?
+   ```
 
-- Nullable unwrapping where safe:
+4. Nullable unwrapping where safe:
 
-```text
-int? -> int
-```
+   ```csharp
+   int? -> int
+   ```
 
 For nullable unwrapping, use predictable behavior:
 
 - If runtime value is null, throw `MappingException`, unless a default convention is explicitly implemented.
-- For projections, generate provider-compatible null handling.
+
+For projections, generate provider-compatible null handling.
 
 Additional conversions, such as numeric widening or enum-string conversion, may be added later but are not mandatory for the first implementation.
 
 Do not introduce lossy conversions silently.
 
+---
 
-20. IQueryable Projection Rules
+## IQueryable Projection Rules
 
 When building projections:
 
-- Build an `Expression<Func<TSource, TTarget>>`.
-- Cache the projection expression by source/target type pair.
-- Inline nested object projections.
-- Avoid `Expression.Invoke`.
-- Avoid compiled delegates inside expression trees.
-- Avoid custom methods unless they are known to be translatable by LINQ providers.
-- Use null-safe conditional expressions for nested references.
-- Detect recursive type-pair projection cycles and throw `MappingException`.
-- Do not rely on identity resolution or a `MappingContext`.
-
-Use standard LINQ aggregate methods:
-
-- `Count()`
-- `Sum(...)`
-- `Average(...)`
-- `Max(...)`
-- `Min(...)`
-- `Any()`
+1. Build an `Expression<Func<TSource, TTarget>>`.
+2. Cache the projection expression by source/target type pair.
+3. Inline nested object projections.
+4. Avoid `Expression.Invoke`.
+5. Avoid compiled delegates inside expression trees.
+6. Avoid custom methods unless they are known to be translatable by LINQ providers.
+7. Use null-safe conditional expressions for nested references.
+8. Detect recursive type-pair projection cycles and throw `MappingException`.
+9. Do not rely on identity resolution or a `MappingContext`.
+10. Use standard LINQ methods where appropriate:
+    - `Count()`
+    - `Sum(...)`
+    - `Average(...)`
+    - `Max(...)`
+    - `Min(...)`
+    - `Any()`
+    - `All(...)` where predicate inference is supported
+    - `First()`
+    - `FirstOrDefault()`
+    - `Last()`
+    - `LastOrDefault()`
 
 Example:
 
@@ -1103,18 +1625,20 @@ source => new ProductDto
     Price = source.Price,
     CategoryName = source.Category != null ? source.Category.Name : null,
     ItemsCount = source.Items.Count(),
-    ItemsPriceSum = source.Items.Sum(x => x.Price)
+    ItemsPriceSum = source.Items.Sum(x => x.Price),
+    FirstItemName = source.Items.Select(x => x.Name).FirstOrDefault()
 }
 ```
 
 This expression must be suitable for providers such as EF Core.
 
+---
 
-21. Expression Rewriting Rules
+## Expression Rewriting Rules
 
 The expression rewriter must visit query expression trees and replace FusionMapper fluent calls with translatable LINQ equivalents.
 
-21.1. Rewrite Map().To<T>()
+### 21.1. Rewrite Map().To<T>()
 
 Before:
 
@@ -1142,7 +1666,9 @@ source.Select(x => MapHelper.Map(x))
 
 That form is not generally provider-translatable.
 
-21.2. Rewrite Project().To<T>()
+---
+
+### 21.2. Rewrite Project().To<T>()
 
 If an expression tree contains:
 
@@ -1161,7 +1687,9 @@ someQueryable.Select(x => new ProductDto
 
 The exact expression should use `System.Linq.Queryable.Select`.
 
-21.3. Unsupported Calls
+---
+
+### 21.3. Unsupported Calls
 
 The following call is not supported inside query projection expression trees:
 
@@ -1177,17 +1705,19 @@ It cannot generally be translated by LINQ providers.
 
 If encountered inside an expression tree, throw `MappingException`.
 
-21.4. Rewriter Requirements
+---
+
+### 21.4. Rewriter Requirements
 
 The rewriter must:
 
-- Visit all lambda expressions.
-- Visit member initialization expressions.
-- Visit nested method calls.
-- Preserve `Where`, `OrderBy`, `Skip`, `Take`, and other query operators.
-- Not mutate the original expression tree.
-- Return the original query if no rewrite is needed.
-- Use the original query provider to create the rewritten query.
+1. Visit all lambda expressions.
+2. Visit member initialization expressions.
+3. Visit nested method calls.
+4. Preserve `Where`, `OrderBy`, `Skip`, `Take`, and other query operators.
+5. Not mutate the original expression tree.
+6. Return the original query if no rewrite is needed.
+7. Use the original query provider to create the rewritten query.
 
 Pseudo-behavior:
 
@@ -1204,19 +1734,20 @@ public static IQueryable<TTarget> Rewrite<TSource, TTarget>(IQueryable<TTarget> 
 }
 ```
 
+---
 
-22. Runtime Engine Responsibilities
+## Runtime Engine Responsibilities
 
 The internal engine is responsible for:
 
-- Building object mapping expressions.
-- Compiling object mapping delegates.
-- Building projection expressions.
-- Caching mapping artifacts.
-- Validating mapping plans.
-- Detecting recursive and cyclic type graphs.
-- Rewriting query expressions.
-- Throwing `MappingException` with useful diagnostics.
+1. Building object mapping expressions.
+2. Compiling object mapping delegates.
+3. Building projection expressions.
+4. Caching mapping artifacts.
+5. Validating mapping plans.
+6. Detecting recursive and cyclic type graphs.
+7. Rewriting query expressions.
+8. Throwing `MappingException` with useful diagnostics.
 
 Recommended internal structure:
 
@@ -1234,14 +1765,15 @@ FusionEngine
 
 There is no `MappingContext` in the architecture.
 
+---
 
-23. Caching
+## Caching
 
 The mapper must cache:
 
-- Compiled object mapping delegates.
-- Projection expressions.
-- Mapping plans.
+1. Compiled object mapping delegates.
+2. Projection expressions.
+3. Mapping plans.
 
 Cache keys should include:
 
@@ -1262,8 +1794,9 @@ Do not rebuild the same mapping plan on every call.
 
 Cached artifacts must not capture per-operation state, identity maps, or visited-object trackers.
 
+---
 
-24. Thread Safety
+## Thread Safety
 
 Mapping caches must be thread-safe.
 
@@ -1273,30 +1806,32 @@ There is no per-operation `MappingContext`.
 
 The mapper must not require per-call mutable state for identity resolution or cycle tracking.
 
+---
 
-25. Source Generator Direction
+## Source Generator Direction
 
 Source generation is a later phase but must remain compatible with the runtime design.
 
 The source generator should:
 
-- Detect calls to:
-  - `Map().To<T>()`
-  - `Map().To(target)`
-  - `Project().To<T>()`
-- Resolve `TSource` and `TTarget` at compile time.
-- Generate mapping implementations.
-- Emit compile-time diagnostics for mapping failures.
-- Optionally use interceptors to replace calls with generated implementations.
-- Keep runtime fallback for cases that cannot be resolved at compile time.
+1. Detect calls to:
+   - `Map().To<T>()`
+   - `Map().To(target)`
+   - `Project().To<T>()`
+
+2. Resolve `TSource` and `TTarget` at compile time.
+3. Generate mapping implementations.
+4. Emit compile-time diagnostics for mapping failures.
+5. Optionally use interceptors to replace calls with generated implementations.
+6. Keep runtime fallback for cases that cannot be resolved at compile time.
 
 Generated runtime mapping should follow the same rules:
 
-- No reflection-based member access during mapping execution.
-- Direct member access and assignment.
-- No identity resolution.
-- No `MappingContext`.
-- Recursive and cyclic type graphs should produce compile-time diagnostics where detectable.
+1. No reflection-based member access during mapping execution.
+2. Direct member access and assignment.
+3. No identity resolution.
+4. No `MappingContext`.
+5. Recursive and cyclic type graphs should produce compile-time diagnostics where detectable.
 
 Important source generation rule:
 
@@ -1322,19 +1857,20 @@ public static Expression<Func<Product, ProductDto>> Projection { get; } =
 
 The bad version is not generally translatable.
 
+---
 
-26. Source Generator Diagnostics
+## Source Generator Diagnostics
 
 The source generator should report diagnostics for:
 
-- Missing required members.
-- Ambiguous member matches.
-- Ambiguous constructors.
-- Recursive or cyclic type graphs.
-- Unsupported recursive projections.
-- Open generic mappings that cannot be generated.
-- Inaccessible source or target types.
-- Unsupported expression rewrite scenarios.
+1. Missing required members.
+2. Ambiguous member matches.
+3. Ambiguous constructors.
+4. Recursive or cyclic type graphs.
+5. Unsupported recursive projections.
+6. Open generic mappings that cannot be generated.
+7. Inaccessible source or target types.
+8. Unsupported expression rewrite scenarios.
 
 Diagnostic message style should be clear and actionable.
 
@@ -1350,8 +1886,9 @@ Example recursive diagnostic:
 FUS002: Recursive mapping detected between 'NodeSource' and 'NodeTarget'. Recursive and cyclic type graphs are not supported.
 ```
 
+---
 
-27. Testing Requirements
+## Testing Requirements
 
 Tests use TUnit.
 
@@ -1377,33 +1914,45 @@ MappingException
 
 Tests should cover:
 
-- Simple property mapping.
-- Case-insensitive mapping.
-- Exact match priority.
-- Ambiguous mapping failure.
-- Flattening.
-- Null nested member handling.
-- Constructor mapping.
-- Record mapping.
-- Required member validation.
-- Init-only member mapping.
-- Nested object mapping for acyclic graphs.
-- Recursive type mapping throws `MappingException`.
-- Cyclic type graph detection throws `MappingException`.
-- Collection mapping.
-- Recursive collection element mapping throws `MappingException`.
-- Mapping into existing object.
-- Mapping into existing mutable collection.
-- Collection aggregate mapping.
-- IQueryable projection.
-- Expression rewriting.
-- Preservation of `Where`, `OrderBy`, and other query operators.
-- Non-mutation of original expression trees.
-- Compiled mapping execution does not rely on reflection-based member setting or dynamic invocation.
-- No identity resolution behavior is expected or required.
+1. Simple property mapping.
+2. Case-insensitive mapping.
+3. Exact match priority.
+4. Ambiguous mapping failure.
+5. Flattening.
+6. Deep flattening without artificial depth limitation.
+7. Null nested member handling.
+8. Null-safe flattening to nullable value types.
+9. Constructor mapping.
+10. Record mapping.
+11. Required member validation.
+12. Init-only member mapping.
+13. Nested object mapping for acyclic graphs.
+14. Recursive type mapping throws `MappingException`.
+15. Cyclic type graph detection throws `MappingException`.
+16. Collection mapping.
+17. Recursive collection element mapping throws `MappingException`.
+18. Mapping into existing object.
+19. Mapping into existing mutable collection.
+20. Collection aggregate mapping.
+21. Terminal collection mapping:
+    - `First`
+    - `FirstOrDefault`
+    - `Last`
+    - `LastOrDefault`
+22. Collection operation before remaining member path.
+23. Collection selector before terminal operation.
+24. Element property plus operation candidate resolution.
+25. Restricted `All` support for bool selectors.
+26. IQueryable projection.
+27. Expression rewriting.
+28. Preservation of `Where`, `OrderBy`, and other query operators.
+29. Non-mutation of original expression trees.
+30. Compiled mapping execution does not rely on reflection-based member setting or dynamic invocation.
+31. No identity resolution behavior is expected or required.
 
+---
 
-28. Expression Rewrite Test Pattern
+## Expression Rewrite Test Pattern
 
 Correct test pattern:
 
@@ -1426,15 +1975,16 @@ var result = rewritten.ToList();
 
 The test must assert:
 
-- Original `query.Expression` contains `Map`.
-- Rewritten query returns correct data.
-- Rewritten expression does not contain `Map`.
-- Original expression is not mutated.
+1. Original `query.Expression` contains `Map`.
+2. Rewritten query returns correct data.
+3. Rewritten expression does not contain `Map`.
+4. Original expression is not mutated.
 
+---
 
-29. Implementation Milestones
+## Implementation Milestones
 
-Milestone 1: Runtime Object Mapping
+### Milestone 1: Runtime Object Mapping
 
 Implement:
 
@@ -1444,20 +1994,23 @@ FusionEngine.Map<TSource, TTarget>(TSource source)
 
 Support:
 
-- Simple properties.
-- Case-insensitive matching.
-- Constructor mapping.
-- Records.
-- Required members.
-- Init-only members.
-- Nested objects in acyclic graphs.
-- Collections.
-- Null handling.
-- Detection and rejection of recursive/cyclic type graphs.
-- `MappingException` diagnostics.
-- Compiled expression-tree mapping execution without runtime reflection.
+1. Simple properties.
+2. Case-insensitive matching.
+3. Recursive suffix flattening without fixed depth limit.
+4. Constructor mapping.
+5. Records.
+6. Required members.
+7. Init-only members.
+8. Nested objects in acyclic graphs.
+9. Collections.
+10. Null handling.
+11. Detection and rejection of recursive/cyclic type graphs.
+12. `MappingException` diagnostics.
+13. Compiled expression-tree mapping execution without runtime reflection.
 
-Milestone 2: Mapping Into Existing Object
+---
+
+### Milestone 2: Mapping Into Existing Object
 
 Implement:
 
@@ -1467,15 +2020,17 @@ FusionEngine.Map<TSource, TTarget>(TSource source, TTarget target)
 
 Support:
 
-- Writable members.
-- Mutable collections.
-- Read-only collection mutation.
-- No required revalidation.
-- No constructor invocation.
-- No `MappingContext`.
-- No identity tracking.
+1. Writable members.
+2. Mutable collections.
+3. Read-only collection mutation.
+4. No required revalidation.
+5. No constructor invocation.
+6. No `MappingContext`.
+7. No identity tracking.
 
-Milestone 3: Projection Building
+---
+
+### Milestone 3: Projection Building
 
 Implement:
 
@@ -1485,16 +2040,18 @@ FusionEngine.Project<TSource, TTarget>(IQueryable<TSource> source)
 
 Support:
 
-- Expression projections.
-- Constructor mapping inside expressions.
-- Nested projections for acyclic graphs.
-- Collection projections.
-- Aggregate conventions.
-- Null-safe conditional expressions.
-- Projection caching.
-- Detection and rejection of recursive/cyclic projection graphs.
+1. Expression projections.
+2. Constructor mapping inside expressions.
+3. Nested projections for acyclic graphs.
+4. Collection projections.
+5. Aggregate and terminal conventions.
+6. Null-safe conditional expressions.
+7. Projection caching.
+8. Detection and rejection of recursive/cyclic projection graphs.
 
-Milestone 4: Expression Rewriting
+---
+
+### Milestone 4: Expression Rewriting
 
 Implement:
 
@@ -1504,68 +2061,79 @@ FusionEngine.Rewrite<TSource, TTarget>(IQueryable<TTarget> query)
 
 Support:
 
-- Rewriting `Map().To<T>()`.
-- Rewriting `Project().To<T>()`.
-- Preserving other query operators.
-- Returning new query via provider.
-- Not mutating original expression.
+1. Rewriting `Map().To<T>()`.
+2. Rewriting `Project().To<T>()`.
+3. Preserving other query operators.
+4. Returning new query via provider.
+5. Not mutating original expression.
 
-Milestone 5: Source Generator
+---
+
+### Milestone 5: Source Generator
 
 Implement compile-time generation for known calls.
 
 Support:
 
-- Generated object mappers.
-- Generated projection expressions.
-- Diagnostics.
-- Optional interceptors.
-- Runtime fallback compatibility.
-- Compile-time detection of recursive/cyclic type graphs where possible.
+1. Generated object mappers.
+2. Generated projection expressions.
+3. Diagnostics.
+4. Optional interceptors.
+5. Runtime fallback compatibility.
+6. Compile-time detection of recursive/cyclic type graphs where possible.
 
+---
 
-30. Rules for LLM Code Generation
+## Rules for LLM Code Generation
 
 When writing code for FusionMapper, an LLM must:
 
-- Preserve the public fluent API.
-- Keep the internal mapping engine internal.
-- Use `MappingException` for mapping errors.
-- Not introduce external mapping libraries.
-- Not require manual mapping profiles.
-- Build runtime object mappings as compiled expression trees.
-- Avoid runtime reflection inside compiled mapping delegates.
-- Prefer expression trees for projections.
-- Avoid custom method calls inside generated projection expressions.
-- Ensure expression rewriting does not mutate original expressions.
-- Write TUnit-compatible tests when tests are requested.
-- Update expression rewrite tests to pass the actual query into the rewriting API.
-- Throw clear `MappingException` errors instead of silently ignoring impossible mappings.
-- Keep implementation incremental and compatible with the milestone plan.
-- Avoid `NotImplementedException` in completed features.
-- Do not change the intended architecture unless explicitly requested.
-- Do not implement `MappingContext`.
-- Do not implement identity resolution.
-- Do not implement cycle preservation.
-- Throw `MappingException` for recursive or cyclic type/object graphs.
+1. Preserve the public fluent API.
+2. Keep the internal mapping engine internal.
+3. Use `MappingException` for mapping errors.
+4. Not introduce external mapping libraries.
+5. Not require manual mapping profiles.
+6. Build runtime object mappings as compiled expression trees.
+7. Avoid runtime reflection inside compiled mapping delegates.
+8. Prefer expression trees for projections.
+9. Avoid custom method calls inside generated projection expressions.
+10. Ensure expression rewriting does not mutate original expressions.
+11. Write TUnit-compatible tests when tests are requested.
+12. Update expression rewrite tests to pass the actual query into the rewriting API.
+13. Throw clear `MappingException` errors instead of silently ignoring impossible mappings.
+14. Keep implementation incremental and compatible with the milestone plan.
+15. Avoid `NotImplementedException` in completed features.
+16. Do not change the intended architecture unless explicitly requested.
+17. Do not implement `MappingContext`.
+18. Do not implement identity resolution.
+19. Do not implement cycle preservation.
+20. Throw `MappingException` for recursive or cyclic type/object graphs.
+21. Do not impose a fixed artificial flattening depth limit unless explicitly requested.
+22. Match collection operation names exactly.
+23. Support recursive suffix passing during member resolution.
+24. Support constructor evaluation as a single plan-building loop.
+25. Support `All` only where a boolean predicate can be inferred automatically.
 
+---
 
-31. Definition of Done
+## Definition of Done
 
 A feature is done when:
 
-- It works for the specified scenario.
-- It throws `MappingException` for invalid scenarios.
-- It does not break existing public API.
-- It has tests where applicable.
-- Runtime mapping execution is based on compiled expression trees.
-- Runtime mapping execution does not use reflection-based member access or invocation.
-- Projection output is expression-tree based.
-- Expression rewriting produces provider-friendly `.Select(...)` calls.
-- Recursive and cyclic mappings throw `MappingException`.
-- No identity resolution is introduced.
-- No `MappingContext` is introduced.
-- No manual mapping configuration is required.
-- No external mapping dependency is introduced.
-- Code follows the namespace and architecture rules in this specification.
-```
+1. It works for the specified scenario.
+2. It throws `MappingException` for invalid scenarios.
+3. It does not break existing public API.
+4. It has tests where applicable.
+5. Runtime mapping execution is based on compiled expression trees.
+6. Runtime mapping execution does not use reflection-based member access or invocation.
+7. Projection output is expression-tree based.
+8. Expression rewriting produces provider-friendly `.Select(...)` calls.
+9. Recursive and cyclic mappings throw `MappingException`.
+10. No identity resolution is introduced.
+11. No `MappingContext` is introduced.
+12. No manual mapping configuration is required.
+13. No external mapping dependency is introduced.
+14. Code follows the namespace and architecture rules in this specification.
+15. Suffix-based member resolution supports backtracking.
+16. Flattening is not limited by a fixed artificial depth.
+17. Constructor mapping evaluates constructor parameters, member bindings, and required members as one plan.
