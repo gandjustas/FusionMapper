@@ -21,25 +21,23 @@ public class RecursiveMappingTests
     [Test]
     public async Task Map_Indirect_Recursive_Type_Throws()
     {
-        var source = new ProductSource
+        var source = new IndirectSourceA
         {
-            Name = "Product",
-            SupplierCosts =
-            [
-                new() {
-                    Name = "Supplier",
-                    Products =
-                    [
-                        new() { Name = "NestedProduct" }
-                    ]
-                }
-            ]
+            Name = "A",
+            Bs =
+        [
+            new ()
+            {
+                Name = "B",
+                As =
+                [
+                    new () { Name = "A2" }
+                ]
+            }
+        ]
         };
 
-        // ProductSource -> ProductTarget, SupplierSource -> SupplierTarget,
-        // при этом SupplierSource.Products ссылается на ProductSource,
-        // что создаёт косвенную рекурсию.
-        await Assert.That(() => source.Map().To<ProductTarget>())
+        await Assert.That(() => source.Map().To<IndirectTargetA>())
             .Throws<MappingException>();
     }
 
@@ -59,5 +57,29 @@ public class RecursiveMappingTests
         // что и контейнер → рекурсивный маппинг.
         await Assert.That(() => source.Map().To<CycleTarget>())
             .Throws<MappingException>();
+    }
+
+    public class IndirectSourceA
+    {
+        public string Name { get; set; } = string.Empty;
+        public List<IndirectSourceB>? Bs { get; set; }
+    }
+
+    public class IndirectSourceB
+    {
+        public string Name { get; set; } = string.Empty;
+        public List<IndirectSourceA>? As { get; set; }
+    }
+
+    public class IndirectTargetA
+    {
+        public string Name { get; set; } = string.Empty;
+        public List<IndirectTargetB>? Bs { get; set; }
+    }
+
+    public class IndirectTargetB
+    {
+        public string Name { get; set; } = string.Empty;
+        public List<IndirectTargetA>? As { get; set; }
     }
 }

@@ -12,9 +12,8 @@ static class MappingBuilder
     {
         var sourceType = typeof(TSource);
         var targetType = typeof(TTarget);
-
-        var body = BuildMappingBody(sourceParam, targetType, sourceType);
-        // Явно приводим к целевому типу, чтобы гарантировать совместимость (например, int -> int?)
+        var path = new Stack<(Type Source, Type Target)>();
+        var body = BuildMappingBody(sourceParam, targetType, sourceType, path);
         return Expression.Convert(body, targetType);
     }
 
@@ -31,13 +30,13 @@ static class MappingBuilder
             .ToArray();
 
         List<Expression> assignments = [];
+        var path = new Stack<(Type, Type)>();
         foreach (var member in members)
         {
             if (TryGetSourceMemberAccess(sourceType, sourceParam, member.Name, out var accessExpr))
             {
                 var targetMemberType = GetMemberType(member);
-                var mappedExpr = BuildMappingBody(accessExpr, targetMemberType, accessExpr.Type);
-                // Присваиваем с приведением к типу члена
+                var mappedExpr = BuildMappingBody(accessExpr, targetMemberType, accessExpr.Type, path);
                 var assign = Expression.Assign(
                     Expression.MakeMemberAccess(targetParam, member),
                     Expression.Convert(mappedExpr, targetMemberType)
@@ -49,8 +48,15 @@ static class MappingBuilder
         return Expression.Block(assignments);
     }
 
-    private static Expression BuildMappingBody(Expression sourceExpr, Type targetType, Type sourceType)
+    private static Expression BuildMappingBody(Expression sourceExpr, Type targetType, Type sourceType, Stack<(Type Source, Type Target)> path)
     {
+        // Проверка на рекурсивный цикл
+        var pair = (sourceType, targetType);
+        if (path.Contains(pair))
+        {
+            throw new MappingException($"Recursive mapping detected between '{sourceType.FullName}' and '{targetType.FullName}'. Path: {string.Join(" -> ", path.Select(p => p.Source.Name + "->" + p.Target.Name))} -> {sourceType.Name}. Recursive and cyclic type graphs are not supported.");
+        }
+
         if (!sourceType.IsValueType || Nullable.GetUnderlyingType(sourceType) != null)
         {
             var nullCheck = Expression.Equal(sourceExpr, Expression.Constant(null));
@@ -66,16 +72,16 @@ static class MappingBuilder
                     Expression.Constant($"Cannot map null source to non-nullable value type '{targetType.FullName}'.")
                 ), targetType);
             }
-            var nonNullBody = BuildNonNullMappingBody(sourceExpr, targetType, sourceType);
+            var nonNullBody = BuildNonNullMappingBody(sourceExpr, targetType, sourceType, path);
             return Expression.Condition(nullCheck, defaultTarget, nonNullBody, targetType);
         }
         else
         {
-            return BuildNonNullMappingBody(sourceExpr, targetType, sourceType);
+            return BuildNonNullMappingBody(sourceExpr, targetType, sourceType, path);
         }
     }
 
-    private static Expression BuildNonNullMappingBody(Expression sourceExpr, Type targetType, Type sourceType)
+    private static Expression BuildNonNullMappingBody(Expression sourceExpr, Type targetType, Type sourceType, Stack<(Type Source, Type Target)> path)
     {
         if (targetType.IsAssignableFrom(sourceType))
             return sourceExpr;
@@ -88,122 +94,125 @@ static class MappingBuilder
         if (IsCollectionType(targetType, out var targetElementType) &&
             IsCollectionType(sourceType, out var sourceElementType))
         {
-            return BuildCollectionMapping(sourceExpr, sourceElementType!, targetElementType!, targetType);
+            return BuildCollectionMapping(sourceExpr, sourceElementType!, targetElementType!, targetType, path);
         }
 
-        return BuildObjectMapping(sourceExpr, targetType, sourceType);
+        return BuildObjectMapping(sourceExpr, targetType, sourceType, path);
     }
 
-    private static Expression BuildObjectMapping(Expression sourceExpr, Type targetType, Type sourceType)
+    private static Expression BuildObjectMapping(Expression sourceExpr, Type targetType, Type sourceType, Stack<(Type Source, Type Target)> path)
     {
-        var constructors = targetType.GetConstructors(BindingFlags.Public | BindingFlags.Instance)
-            .Where(c => c.GetParameters().Length > 0)
-            .OrderByDescending(c => c.GetParameters().Length)
-            .ToArray();
+        path.Push((sourceType, targetType));
 
-        ConstructorInfo? selectedCtor = null;
-        Dictionary<string, Expression>? paramMap = null;
-
-        foreach (var ctor in constructors)
+        try
         {
-            var parameters = ctor.GetParameters();
-            Dictionary<string, Expression> dict = [];
-            bool allFound = true;
-            foreach (var param in parameters)
+            var constructors = targetType.GetConstructors(BindingFlags.Public | BindingFlags.Instance)
+                .Where(c => c.GetParameters().Length > 0)
+                .OrderByDescending(c => c.GetParameters().Length)
+                .ToArray();
+
+            ConstructorInfo? selectedCtor = null;
+            Dictionary<string, Expression>? paramMap = null;
+
+            foreach (var ctor in constructors)
             {
-                if (TryGetSourceMemberAccess(sourceType, sourceExpr, param.Name!, out var accessExpr))
+                var parameters = ctor.GetParameters();
+                Dictionary<string, Expression> dict = [];
+                bool allFound = true;
+                foreach (var param in parameters)
                 {
-                    var mappedExpr = BuildMappingBody(accessExpr, param.ParameterType, accessExpr.Type);
-                    // Приводим к типу параметра конструктора
-                    dict[param.Name!] = Expression.Convert(mappedExpr, param.ParameterType);
+                    if (TryGetSourceMemberAccess(sourceType, sourceExpr, param.Name!, out var accessExpr))
+                    {
+                        var mappedExpr = BuildMappingBody(accessExpr, param.ParameterType, accessExpr.Type, path);
+                        dict[param.Name!] = Expression.Convert(mappedExpr, param.ParameterType);
+                    }
+                    else
+                    {
+                        allFound = false;
+                        break;
+                    }
                 }
-                else
+                if (allFound)
                 {
-                    allFound = false;
+                    selectedCtor = ctor;
+                    paramMap = dict;
                     break;
                 }
             }
-            if (allFound)
+
+            if (selectedCtor == null)
             {
-                selectedCtor = ctor;
-                paramMap = dict;
-                break;
+                selectedCtor = targetType.GetConstructor(Type.EmptyTypes)
+                    ?? throw new MappingException($"No suitable constructor found for type '{targetType.FullName}'.");
+                paramMap = [];
             }
-        }
 
-        if (selectedCtor == null)
-        {
-            selectedCtor = targetType.GetConstructor(Type.EmptyTypes)
-                ?? throw new MappingException($"No suitable constructor found for type '{targetType.FullName}'.");
-            paramMap = [];
-        }
-
-        NewExpression newExpr;
-        if (selectedCtor.GetParameters().Length == 0)
-        {
-            newExpr = Expression.New(selectedCtor);
-        }
-        else
-        {
-            var args = selectedCtor.GetParameters().Select(p => paramMap![p.Name!]).ToArray();
-            newExpr = Expression.New(selectedCtor, args);
-        }
-
-        HashSet<string> initializedMembers = [.. selectedCtor.GetParameters().Select(p => p.Name!)];
-
-        var targetMembers = targetType.GetProperties(BindingFlags.Public | BindingFlags.Instance)
-            .Where(p => p.CanWrite)
-            .Cast<MemberInfo>()
-            .Concat(targetType.GetFields(BindingFlags.Public | BindingFlags.Instance)
-                .Where(f => !f.IsInitOnly && !f.IsLiteral))
-            .ToArray();
-
-        var requiredMembers = targetMembers.Where(m => m.GetCustomAttribute<RequiredMemberAttribute>() != null).ToArray();
-
-        List<MemberBinding> bindings = [];
-        foreach (var member in targetMembers)
-        {
-            if (initializedMembers.Contains(member.Name))
-                continue;
-
-            if (TryGetSourceMemberAccess(sourceType, sourceExpr, member.Name, out var accessExpr))
+            NewExpression newExpr;
+            if (selectedCtor.GetParameters().Length == 0)
             {
-                var targetMemberType = GetMemberType(member);
-                var mappedExpr = BuildMappingBody(accessExpr, targetMemberType, accessExpr.Type);
-                // Приводим к типу члена
-                var converted = Expression.Convert(mappedExpr, targetMemberType);
-                var binding = Expression.Bind(member, converted);
-                bindings.Add(binding);
-                initializedMembers.Add(member.Name);
+                newExpr = Expression.New(selectedCtor);
             }
             else
             {
-                if (requiredMembers.Contains(member))
-                    throw new MappingException($"Required member '{member.Name}' cannot be mapped from source type '{sourceType.FullName}'.");
+                var args = selectedCtor.GetParameters().Select(p => paramMap![p.Name!]).ToArray();
+                newExpr = Expression.New(selectedCtor, args);
             }
-        }
 
-        if (selectedCtor.GetCustomAttribute<SetsRequiredMembersAttribute>() == null)
+            HashSet<string> initializedMembers = [.. selectedCtor.GetParameters().Select(p => p.Name!)];
+
+            var targetMembers = targetType.GetProperties(BindingFlags.Public | BindingFlags.Instance)
+                .Where(p => p.CanWrite)
+                .Cast<MemberInfo>()
+                .Concat(targetType.GetFields(BindingFlags.Public | BindingFlags.Instance)
+                    .Where(f => !f.IsInitOnly && !f.IsLiteral))
+                .ToArray();
+
+            var requiredMembers = targetMembers.Where(m => m.GetCustomAttribute<RequiredMemberAttribute>() != null).ToArray();
+
+            List<MemberBinding> bindings = [];
+            foreach (var member in targetMembers)
+            {
+                if (initializedMembers.Contains(member.Name))
+                    continue;
+
+                if (TryGetSourceMemberAccess(sourceType, sourceExpr, member.Name, out var accessExpr))
+                {
+                    var targetMemberType = GetMemberType(member);
+                    var mappedExpr = BuildMappingBody(accessExpr, targetMemberType, accessExpr.Type, path);
+                    var converted = Expression.Convert(mappedExpr, targetMemberType);
+                    var binding = Expression.Bind(member, converted);
+                    bindings.Add(binding);
+                    initializedMembers.Add(member.Name);
+                }
+                else
+                {
+                    if (requiredMembers.Contains(member))
+                        throw new MappingException($"Required member '{member.Name}' cannot be mapped from source type '{sourceType.FullName}'.");
+                }
+            }
+
+            if (selectedCtor.GetCustomAttribute<SetsRequiredMembersAttribute>() == null)
+            {
+                foreach (var req in requiredMembers.Where(r => !initializedMembers.Contains(r.Name)))
+                    throw new MappingException($"Required member '{req.Name}' was not initialized.");
+            }
+
+            return bindings.Count > 0
+                ? Expression.MemberInit(newExpr, bindings)
+                : newExpr;
+        }
+        finally
         {
-            foreach (var req in requiredMembers.Where(r => !initializedMembers.Contains(r.Name)))
-                throw new MappingException($"Required member '{req.Name}' was not initialized.");
+            path.Pop();
         }
-
-        return bindings.Count > 0
-            ? Expression.MemberInit(newExpr, bindings)
-            : newExpr;
     }
 
-    private static Expression BuildCollectionMapping(Expression sourceExpr, Type sourceElementType, Type targetElementType, Type targetCollectionType)
+    private static Expression BuildCollectionMapping(Expression sourceExpr, Type sourceElementType, Type targetElementType, Type targetCollectionType, Stack<(Type, Type)> path)
     {
         var itemParam = Expression.Parameter(sourceElementType, "item");
-        var mapCall = Expression.Call(
-            typeof(FusionMapper),
-            nameof(FusionMapper.Map),
-            [sourceElementType, targetElementType],
-            itemParam
-        );
-        var lambda = Expression.Lambda(mapCall, itemParam);
+        // Встраиваем маппинг для элемента, передавая стек
+        var mappedItem = BuildMappingBody(itemParam, targetElementType, sourceElementType, path);
+        var lambda = Expression.Lambda(mappedItem, itemParam);
 
         var selectCall = Expression.Call(
             typeof(Enumerable),
