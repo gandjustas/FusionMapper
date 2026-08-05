@@ -59,26 +59,37 @@ static class MappingBuilder
 
         if (!sourceType.IsValueType || Nullable.GetUnderlyingType(sourceType) != null)
         {
-            var nullCheck = Expression.Equal(sourceExpr, Expression.Constant(null));
+            var nullCheck = Expression.Equal(
+                sourceExpr,
+                Expression.Constant(null, sourceType));
+
             Expression defaultTarget;
+
             if (targetType.IsClass || Nullable.GetUnderlyingType(targetType) != null)
             {
                 defaultTarget = Expression.Default(targetType);
             }
             else
             {
-                defaultTarget = Expression.Throw(Expression.New(
-                    typeof(MappingException).GetConstructor([typeof(string)])!,
-                    Expression.Constant($"Cannot map null source to non-nullable value type '{targetType.FullName}'.")
-                ), targetType);
+                defaultTarget = Expression.Throw(
+                    Expression.New(
+                        typeof(MappingException).GetConstructor([typeof(string)])!,
+                        Expression.Constant(
+                            $"Cannot map null source to non-nullable value type '{targetType.FullName}'.")
+                    ),
+                    targetType);
             }
+
             var nonNullBody = BuildNonNullMappingBody(sourceExpr, targetType, sourceType, path);
-            return Expression.Condition(nullCheck, defaultTarget, nonNullBody, targetType);
+
+            return Expression.Condition(
+                nullCheck,
+                defaultTarget,
+                nonNullBody,
+                targetType);
         }
-        else
-        {
-            return BuildNonNullMappingBody(sourceExpr, targetType, sourceType, path);
-        }
+
+        return BuildNonNullMappingBody(sourceExpr, targetType, sourceType, path);
     }
 
     private static Expression BuildNonNullMappingBody(Expression sourceExpr, Type targetType, Type sourceType, Stack<(Type Source, Type Target)> path)
@@ -273,33 +284,329 @@ static class MappingBuilder
         throw new MappingException($"Cannot map collection to type '{targetCollectionType.FullName}'.");
     }
 
-    private static bool TryGetSourceMemberAccess(Type sourceType, Expression sourceExpr, string targetMemberName, out Expression accessExpr)
+    private sealed record SuffixFlatteningCandidate(
+        Expression Access,
+        IReadOnlyList<Expression> NullChecks,
+        int Depth,
+        string Path);
+
+    private static bool TryGetSourceMemberAccess(
+        Type sourceType,
+        Expression sourceExpr,
+        string targetMemberName,
+        out Expression accessExpr)
     {
-        var members = sourceType.GetProperties(BindingFlags.Public | BindingFlags.Instance)
-            .Cast<MemberInfo>()
-            .Concat(sourceType.GetFields(BindingFlags.Public | BindingFlags.Instance))
-            .ToArray();
-
-        var exact = members.Where(m => m.Name.Equals(targetMemberName, StringComparison.Ordinal)).ToArray();
-        if (exact.Length == 1)
+        // 1. Exact direct match.
+        if (TryGetDirectSourceMemberAccess(
+                sourceType,
+                sourceExpr,
+                targetMemberName,
+                exactOnly: true,
+                out accessExpr))
         {
-            accessExpr = Expression.MakeMemberAccess(sourceExpr, exact[0]);
             return true;
         }
-        if (exact.Length > 1)
-            throw new MappingException($"Ambiguous exact match for member '{targetMemberName}'.");
 
-        var insensitive = members.Where(m => m.Name.Equals(targetMemberName, StringComparison.OrdinalIgnoreCase)).ToArray();
-        if (insensitive.Length == 1)
+        // 2. Case-insensitive direct match.
+        if (TryGetDirectSourceMemberAccess(
+                sourceType,
+                sourceExpr,
+                targetMemberName,
+                exactOnly: false,
+                out accessExpr))
         {
-            accessExpr = Expression.MakeMemberAccess(sourceExpr, insensitive[0]);
             return true;
         }
-        if (insensitive.Length > 1)
-            throw new MappingException($"Ambiguous case-insensitive match for member '{targetMemberName}'.");
+
+        // 3. Recursive suffix flattening.
+        if (TryGetSuffixFlattenedSourceMemberAccess(
+                sourceType,
+                sourceExpr,
+                targetMemberName,
+                out accessExpr))
+        {
+            return true;
+        }
 
         accessExpr = null!;
         return false;
+    }
+
+    private static bool TryGetDirectSourceMemberAccess(
+        Type sourceType,
+        Expression sourceExpr,
+        string memberName,
+        bool exactOnly,
+        out Expression accessExpr)
+    {
+        accessExpr = null!;
+
+        if (!TryGetDirectSourceMember(sourceType, memberName, exactOnly, out var member))
+            return false;
+
+        accessExpr = Expression.MakeMemberAccess(sourceExpr, member);
+        return true;
+    }
+
+    private static bool TryGetDirectSourceMember(
+        Type sourceType,
+        string memberName,
+        bool exactOnly,
+        out MemberInfo member)
+    {
+        member = null!;
+
+        var comparison = exactOnly
+            ? StringComparison.Ordinal
+            : StringComparison.OrdinalIgnoreCase;
+
+        var candidates = GetSourceMembers(sourceType)
+            .Where(m => string.Equals(m.Name, memberName, comparison))
+            .ToArray();
+
+        if (candidates.Length == 1)
+        {
+            member = candidates[0];
+            return true;
+        }
+
+        if (candidates.Length > 1)
+        {
+            var preferred = TryGetPreferredProperty(candidates);
+            if (preferred is not null)
+            {
+                member = preferred;
+                return true;
+            }
+
+            throw new MappingException(
+                $"Ambiguous source member match for member '{memberName}' on source type '{sourceType.FullName}'.");
+        }
+
+        return false;
+    }
+
+    private static bool TryGetSuffixFlattenedSourceMemberAccess(
+        Type sourceType,
+        Expression sourceExpr,
+        string targetMemberName,
+        out Expression accessExpr)
+    {
+        accessExpr = null!;
+
+        var exactCandidates = GetSuffixFlatteningCandidates(
+                sourceType,
+                sourceExpr,
+                targetMemberName,
+                exactOnly: true,
+                path: string.Empty,
+                depth: 0)
+            .ToArray();
+
+        var candidates = exactCandidates;
+
+        if (candidates.Length == 0)
+        {
+            candidates = [.. GetSuffixFlatteningCandidates(
+                    sourceType,
+                    sourceExpr,
+                    targetMemberName,
+                    exactOnly: false,
+                    path: string.Empty,
+                    depth: 0)];
+        }
+
+        if (candidates.Length == 0)
+            return false;
+
+        var minDepth = candidates.Min(c => c.Depth);
+
+        var bestCandidates = candidates
+            .Where(c => c.Depth == minDepth)
+            .ToArray();
+
+        if (bestCandidates.Length > 1)
+        {
+            throw new MappingException(
+                $"Ambiguous suffix flattening match for target member '{targetMemberName}'. " +
+                $"Candidates: {string.Join("; ", bestCandidates.Select(c => c.Path))}.");
+        }
+
+        var best = bestCandidates[0];
+
+        accessExpr = MakeNullSafe(best.Access, best.NullChecks);
+        return true;
+    }
+
+    private static IEnumerable<SuffixFlatteningCandidate> GetSuffixFlatteningCandidates(
+        Type sourceType,
+        Expression sourceExpr,
+        string remainingName,
+        bool exactOnly,
+        string path,
+        int depth)
+    {
+        // Если оставшийся суффикс находится напрямую, это самый короткий вариант.
+        if (TryGetDirectSourceMember(sourceType, remainingName, exactOnly, out var directMember))
+        {
+            var directPath = AppendPath(path, directMember.Name);
+
+            yield return new SuffixFlatteningCandidate(
+                Expression.MakeMemberAccess(sourceExpr, directMember),
+                [],
+                depth + 1,
+                directPath);
+
+            yield break;
+        }
+
+        foreach (var member in GetSourceMembers(sourceType))
+        {
+            if (!TryGetPrefixSuffix(remainingName, member.Name, exactOnly, out var suffix))
+                continue;
+
+            var memberAccess = Expression.MakeMemberAccess(sourceExpr, member);
+            var memberType = GetMemberType(member);
+
+            List<Expression> nullChecks = [];
+
+            if (CanBeNull(memberType))
+                nullChecks.Add(memberAccess);
+
+            Expression nextExpr = memberAccess;
+            Type nextType = memberType;
+
+            var underlyingType = Nullable.GetUnderlyingType(nextType);
+            if (underlyingType is not null)
+            {
+                nextExpr = Expression.Property(nextExpr, "Value");
+                nextType = underlyingType;
+            }
+
+            var memberPath = AppendPath(path, member.Name);
+
+            foreach (var nested in GetSuffixFlatteningCandidates(
+                         nextType,
+                         nextExpr,
+                         suffix,
+                         exactOnly,
+                         memberPath,
+                         depth + 1))
+            {
+                List<Expression> combinedNullChecks = [.. nullChecks];
+                combinedNullChecks.AddRange(nested.NullChecks);
+
+                yield return nested with
+                {
+                    NullChecks = combinedNullChecks
+                };
+            }
+        }
+    }
+
+    private static bool TryGetPrefixSuffix(
+        string remainingName,
+        string memberName,
+        bool exactOnly,
+        out string suffix)
+    {
+        suffix = string.Empty;
+
+        if (string.IsNullOrEmpty(memberName))
+            return false;
+
+        if (remainingName.Length <= memberName.Length)
+            return false;
+
+        var comparison = exactOnly
+            ? StringComparison.Ordinal
+            : StringComparison.OrdinalIgnoreCase;
+
+        if (!remainingName.StartsWith(memberName, comparison))
+            return false;
+
+        suffix = remainingName[memberName.Length..]
+            .TrimStart('_');
+
+        return suffix.Length > 0;
+    }
+
+    private static Expression MakeNullSafe(
+        Expression body,
+        IReadOnlyList<Expression> nullChecks)
+    {
+        // Если по пути могут быть null, а конечный член имеет non-nullable value type,
+        // то результатом должен быть Nullable<T>, чтобы null был null, а не 0/false/default.
+        if (nullChecks.Count > 0 &&
+            body.Type.IsValueType &&
+            Nullable.GetUnderlyingType(body.Type) is null)
+        {
+            body = Expression.Convert(
+                body,
+                typeof(Nullable<>).MakeGenericType(body.Type));
+        }
+
+        Expression result = body;
+
+        for (var i = nullChecks.Count - 1; i >= 0; i--)
+        {
+            var check = nullChecks[i];
+
+            if (!CanBeNull(check.Type))
+                continue;
+
+            var isNull = Expression.Equal(
+                check,
+                Expression.Constant(null, check.Type));
+
+            var defaultValue = Expression.Default(result.Type);
+
+            result = Expression.Condition(
+                isNull,
+                defaultValue,
+                result,
+                result.Type);
+        }
+
+        return result;
+    }
+
+    private static bool CanBeNull(Type type)
+    {
+        return !type.IsValueType || Nullable.GetUnderlyingType(type) is not null;
+    }
+
+    private static IEnumerable<MemberInfo> GetSourceMembers(Type sourceType)
+    {
+        var properties = sourceType
+            .GetProperties(BindingFlags.Public | BindingFlags.Instance)
+            .Where(p =>
+                p.CanRead &&
+                p.GetGetMethod() is not null &&
+                p.GetIndexParameters().Length == 0)
+            .Cast<MemberInfo>();
+
+        var fields = sourceType
+            .GetFields(BindingFlags.Public | BindingFlags.Instance)
+            .Cast<MemberInfo>();
+
+        // Свойства предпочтительнее полей, если имя совпадает.
+        return properties.Concat(fields)
+            .GroupBy(m => m.Name, StringComparer.Ordinal)
+            .Select(g => g.OfType<PropertyInfo>().FirstOrDefault() ?? g.First());
+    }
+
+    private static PropertyInfo? TryGetPreferredProperty(MemberInfo[] candidates)
+    {
+        var properties = candidates.OfType<PropertyInfo>().ToArray();
+        return properties.Length == 1 ? properties[0] : null;
+    }
+
+    private static string AppendPath(string path, string memberName)
+    {
+        return string.IsNullOrEmpty(path)
+            ? memberName
+            : $"{path}.{memberName}";
     }
 
     private static Expression TryConvert(Expression expr, Type targetType)
