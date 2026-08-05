@@ -14,16 +14,11 @@ public static class ExpressionHelper
         return scanner.Found;
     }
 
-    private sealed class MethodNameScanner : ExpressionVisitor
+    private sealed class MethodNameScanner(string methodName) : ExpressionVisitor
     {
-        private readonly string _methodName;
+        private readonly string _methodName = methodName;
 
         public bool Found { get; private set; }
-
-        public MethodNameScanner(string methodName)
-        {
-            _methodName = methodName;
-        }
 
         protected override Expression VisitMethodCall(MethodCallExpression node)
         {

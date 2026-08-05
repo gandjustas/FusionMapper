@@ -1,0 +1,388 @@
+using System.Collections;
+using System.Diagnostics.CodeAnalysis;
+using System.Linq.Expressions;
+using System.Reflection;
+using System.Runtime.CompilerServices;
+
+namespace FusionMapper;
+
+static class MappingBuilder
+{
+    public static Expression BuildCreationExpression<TSource, TTarget>(ParameterExpression sourceParam)
+    {
+        var sourceType = typeof(TSource);
+        var targetType = typeof(TTarget);
+
+        var body = BuildMappingBody(sourceParam, targetType, sourceType);
+        // Явно приводим к целевому типу, чтобы гарантировать совместимость (например, int -> int?)
+        return Expression.Convert(body, targetType);
+    }
+
+    public static Expression BuildAssignmentExpression<TSource, TTarget>(ParameterExpression sourceParam, ParameterExpression targetParam)
+    {
+        var sourceType = typeof(TSource);
+        var targetType = typeof(TTarget);
+
+        var members = targetType.GetProperties(BindingFlags.Public | BindingFlags.Instance)
+            .Where(p => p.CanWrite && !IsInitOnly(p))
+            .Cast<MemberInfo>()
+            .Concat(targetType.GetFields(BindingFlags.Public | BindingFlags.Instance)
+                .Where(f => !f.IsInitOnly && !f.IsLiteral))
+            .ToArray();
+
+        List<Expression> assignments = [];
+        foreach (var member in members)
+        {
+            if (TryGetSourceMemberAccess(sourceType, sourceParam, member.Name, out var accessExpr))
+            {
+                var targetMemberType = GetMemberType(member);
+                var mappedExpr = BuildMappingBody(accessExpr, targetMemberType, accessExpr.Type);
+                // Присваиваем с приведением к типу члена
+                var assign = Expression.Assign(
+                    Expression.MakeMemberAccess(targetParam, member),
+                    Expression.Convert(mappedExpr, targetMemberType)
+                );
+                assignments.Add(assign);
+            }
+        }
+
+        return Expression.Block(assignments);
+    }
+
+    private static Expression BuildMappingBody(Expression sourceExpr, Type targetType, Type sourceType)
+    {
+        if (!sourceType.IsValueType || Nullable.GetUnderlyingType(sourceType) != null)
+        {
+            var nullCheck = Expression.Equal(sourceExpr, Expression.Constant(null));
+            Expression defaultTarget;
+            if (targetType.IsClass || Nullable.GetUnderlyingType(targetType) != null)
+            {
+                defaultTarget = Expression.Default(targetType);
+            }
+            else
+            {
+                defaultTarget = Expression.Throw(Expression.New(
+                    typeof(MappingException).GetConstructor([typeof(string)])!,
+                    Expression.Constant($"Cannot map null source to non-nullable value type '{targetType.FullName}'.")
+                ), targetType);
+            }
+            var nonNullBody = BuildNonNullMappingBody(sourceExpr, targetType, sourceType);
+            return Expression.Condition(nullCheck, defaultTarget, nonNullBody, targetType);
+        }
+        else
+        {
+            return BuildNonNullMappingBody(sourceExpr, targetType, sourceType);
+        }
+    }
+
+    private static Expression BuildNonNullMappingBody(Expression sourceExpr, Type targetType, Type sourceType)
+    {
+        if (targetType.IsAssignableFrom(sourceType))
+            return sourceExpr;
+
+        if (IsSimpleType(targetType) || IsSimpleType(sourceType))
+        {
+            return TryConvert(sourceExpr, targetType);
+        }
+
+        if (IsCollectionType(targetType, out var targetElementType) &&
+            IsCollectionType(sourceType, out var sourceElementType))
+        {
+            return BuildCollectionMapping(sourceExpr, sourceElementType!, targetElementType!, targetType);
+        }
+
+        return BuildObjectMapping(sourceExpr, targetType, sourceType);
+    }
+
+    private static Expression BuildObjectMapping(Expression sourceExpr, Type targetType, Type sourceType)
+    {
+        var constructors = targetType.GetConstructors(BindingFlags.Public | BindingFlags.Instance)
+            .Where(c => c.GetParameters().Length > 0)
+            .OrderByDescending(c => c.GetParameters().Length)
+            .ToArray();
+
+        ConstructorInfo? selectedCtor = null;
+        Dictionary<string, Expression>? paramMap = null;
+
+        foreach (var ctor in constructors)
+        {
+            var parameters = ctor.GetParameters();
+            Dictionary<string, Expression> dict = [];
+            bool allFound = true;
+            foreach (var param in parameters)
+            {
+                if (TryGetSourceMemberAccess(sourceType, sourceExpr, param.Name!, out var accessExpr))
+                {
+                    var mappedExpr = BuildMappingBody(accessExpr, param.ParameterType, accessExpr.Type);
+                    // Приводим к типу параметра конструктора
+                    dict[param.Name!] = Expression.Convert(mappedExpr, param.ParameterType);
+                }
+                else
+                {
+                    allFound = false;
+                    break;
+                }
+            }
+            if (allFound)
+            {
+                selectedCtor = ctor;
+                paramMap = dict;
+                break;
+            }
+        }
+
+        if (selectedCtor == null)
+        {
+            selectedCtor = targetType.GetConstructor(Type.EmptyTypes)
+                ?? throw new MappingException($"No suitable constructor found for type '{targetType.FullName}'.");
+            paramMap = [];
+        }
+
+        NewExpression newExpr;
+        if (selectedCtor.GetParameters().Length == 0)
+        {
+            newExpr = Expression.New(selectedCtor);
+        }
+        else
+        {
+            var args = selectedCtor.GetParameters().Select(p => paramMap![p.Name!]).ToArray();
+            newExpr = Expression.New(selectedCtor, args);
+        }
+
+        HashSet<string> initializedMembers = [.. selectedCtor.GetParameters().Select(p => p.Name!)];
+
+        var targetMembers = targetType.GetProperties(BindingFlags.Public | BindingFlags.Instance)
+            .Where(p => p.CanWrite)
+            .Cast<MemberInfo>()
+            .Concat(targetType.GetFields(BindingFlags.Public | BindingFlags.Instance)
+                .Where(f => !f.IsInitOnly && !f.IsLiteral))
+            .ToArray();
+
+        var requiredMembers = targetMembers.Where(m => m.GetCustomAttribute<RequiredMemberAttribute>() != null).ToArray();
+
+        List<MemberBinding> bindings = [];
+        foreach (var member in targetMembers)
+        {
+            if (initializedMembers.Contains(member.Name))
+                continue;
+
+            if (TryGetSourceMemberAccess(sourceType, sourceExpr, member.Name, out var accessExpr))
+            {
+                var targetMemberType = GetMemberType(member);
+                var mappedExpr = BuildMappingBody(accessExpr, targetMemberType, accessExpr.Type);
+                // Приводим к типу члена
+                var converted = Expression.Convert(mappedExpr, targetMemberType);
+                var binding = Expression.Bind(member, converted);
+                bindings.Add(binding);
+                initializedMembers.Add(member.Name);
+            }
+            else
+            {
+                if (requiredMembers.Contains(member))
+                    throw new MappingException($"Required member '{member.Name}' cannot be mapped from source type '{sourceType.FullName}'.");
+            }
+        }
+
+        if (selectedCtor.GetCustomAttribute<SetsRequiredMembersAttribute>() == null)
+        {
+            foreach (var req in requiredMembers.Where(r => !initializedMembers.Contains(r.Name)))
+                throw new MappingException($"Required member '{req.Name}' was not initialized.");
+        }
+
+        return bindings.Count > 0
+            ? Expression.MemberInit(newExpr, bindings)
+            : newExpr;
+    }
+
+    private static Expression BuildCollectionMapping(Expression sourceExpr, Type sourceElementType, Type targetElementType, Type targetCollectionType)
+    {
+        var itemParam = Expression.Parameter(sourceElementType, "item");
+        var mapCall = Expression.Call(
+            typeof(FusionMapper),
+            nameof(FusionMapper.Map),
+            [sourceElementType, targetElementType],
+            itemParam
+        );
+        var lambda = Expression.Lambda(mapCall, itemParam);
+
+        var selectCall = Expression.Call(
+            typeof(Enumerable),
+            nameof(Enumerable.Select),
+            [sourceElementType, targetElementType],
+            sourceExpr,
+            lambda
+        );
+
+        if (targetCollectionType.IsArray)
+        {
+            return Expression.Call(
+                typeof(Enumerable),
+                nameof(Enumerable.ToArray),
+                [targetElementType],
+                selectCall
+            );
+        }
+
+        if (targetCollectionType.IsGenericType && targetCollectionType.GetGenericTypeDefinition() == typeof(List<>))
+        {
+            return Expression.Call(
+                typeof(Enumerable),
+                nameof(Enumerable.ToList),
+                [targetElementType],
+                selectCall
+            );
+        }
+
+        if (targetCollectionType.IsInterface)
+        {
+            return Expression.Call(
+                typeof(Enumerable),
+                nameof(Enumerable.ToList),
+                [targetElementType],
+                selectCall
+            );
+        }
+
+        var ctor = targetCollectionType.GetConstructor([typeof(IEnumerable<>).MakeGenericType(targetElementType)]);
+        if (ctor != null)
+        {
+            return Expression.New(ctor, selectCall);
+        }
+
+        var defaultCtor = targetCollectionType.GetConstructor(Type.EmptyTypes);
+        if (defaultCtor != null)
+        {
+            var newCollection = Expression.New(defaultCtor);
+            var addRangeMethod = targetCollectionType.GetMethod("AddRange", [typeof(IEnumerable<>).MakeGenericType(targetElementType)]);
+            if (addRangeMethod != null)
+            {
+                return Expression.Call(newCollection, addRangeMethod, selectCall);
+            }
+            throw new MappingException($"Cannot map collection to type '{targetCollectionType.FullName}' because it has no AddRange method.");
+        }
+
+        throw new MappingException($"Cannot map collection to type '{targetCollectionType.FullName}'.");
+    }
+
+    private static bool TryGetSourceMemberAccess(Type sourceType, Expression sourceExpr, string targetMemberName, out Expression accessExpr)
+    {
+        var members = sourceType.GetProperties(BindingFlags.Public | BindingFlags.Instance)
+            .Cast<MemberInfo>()
+            .Concat(sourceType.GetFields(BindingFlags.Public | BindingFlags.Instance))
+            .ToArray();
+
+        var exact = members.Where(m => m.Name.Equals(targetMemberName, StringComparison.Ordinal)).ToArray();
+        if (exact.Length == 1)
+        {
+            accessExpr = Expression.MakeMemberAccess(sourceExpr, exact[0]);
+            return true;
+        }
+        if (exact.Length > 1)
+            throw new MappingException($"Ambiguous exact match for member '{targetMemberName}'.");
+
+        var insensitive = members.Where(m => m.Name.Equals(targetMemberName, StringComparison.OrdinalIgnoreCase)).ToArray();
+        if (insensitive.Length == 1)
+        {
+            accessExpr = Expression.MakeMemberAccess(sourceExpr, insensitive[0]);
+            return true;
+        }
+        if (insensitive.Length > 1)
+            throw new MappingException($"Ambiguous case-insensitive match for member '{targetMemberName}'.");
+
+        accessExpr = null!;
+        return false;
+    }
+
+    private static Expression TryConvert(Expression expr, Type targetType)
+    {
+        if (expr.Type == targetType)
+            return expr;
+
+        if (targetType.IsAssignableFrom(expr.Type))
+            return expr;
+
+        if (expr.Type.IsGenericType && expr.Type.GetGenericTypeDefinition() == typeof(Nullable<>))
+        {
+            var underlying = Nullable.GetUnderlyingType(expr.Type);
+            if (targetType == underlying)
+                return Expression.Convert(expr, targetType);
+        }
+        else if (targetType.IsGenericType && targetType.GetGenericTypeDefinition() == typeof(Nullable<>))
+        {
+            var underlying = Nullable.GetUnderlyingType(targetType);
+            if (expr.Type == underlying)
+                return Expression.Convert(expr, targetType);
+        }
+
+        return Expression.Convert(expr, targetType);
+    }
+
+    private static bool IsSimpleType(Type type)
+    {
+        type = Nullable.GetUnderlyingType(type) ?? type;
+        return type.IsPrimitive ||
+               type.IsEnum ||
+               type == typeof(string) ||
+               type == typeof(decimal) ||
+               type == typeof(DateTime) ||
+               type == typeof(Guid) ||
+               type == typeof(TimeSpan) ||
+               type == typeof(DateTimeOffset);
+    }
+
+    private static bool IsCollectionType(Type type, out Type? elementType)
+    {
+        elementType = null;
+        if (type == typeof(string))
+            return false;
+
+        if (type.IsArray)
+        {
+            elementType = type.GetElementType();
+            return true;
+        }
+
+        if (type.IsGenericType)
+        {
+            var genType = type.GetGenericTypeDefinition();
+            if (genType == typeof(IEnumerable<>) ||
+                genType == typeof(ICollection<>) ||
+                genType == typeof(IList<>) ||
+                genType == typeof(List<>))
+            {
+                elementType = type.GetGenericArguments()[0];
+                return true;
+            }
+        }
+
+        var interfaces = type.GetInterfaces();
+        foreach (var iface in interfaces)
+        {
+            if (iface.IsGenericType && iface.GetGenericTypeDefinition() == typeof(IEnumerable<>))
+            {
+                elementType = iface.GetGenericArguments()[0];
+                return true;
+            }
+        }
+
+        return false;
+    }
+
+    private static bool IsInitOnly(PropertyInfo property)
+    {
+        var setMethod = property.SetMethod;
+        if (setMethod == null) return true;
+        var parameters = setMethod.GetParameters();
+        if (parameters.Length == 0) return false;
+        var lastParam = parameters[^1];
+        var modReqs = lastParam.GetRequiredCustomModifiers();
+        return modReqs.Any(t => t.Name == "IsExternalInit" && t.Namespace == "System.Runtime.CompilerServices");
+    }
+
+    private static Type GetMemberType(MemberInfo member) => member switch
+    {
+        PropertyInfo p => p.PropertyType,
+        FieldInfo f => f.FieldType,
+        _ => throw new InvalidOperationException("Unsupported member type")
+    };
+}
