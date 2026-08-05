@@ -11,8 +11,8 @@ public static class FusionMapper
     public static FusionProjection<TSource> Project<TSource>(this IQueryable<TSource> source)
         => new(source);
 
-    static readonly ConcurrentDictionary<(Type Source, Type Traget), Delegate> MapDelegates = new();
-    static readonly ConcurrentDictionary<(Type Source, Type Traget), Delegate> MapToExistingDelegates = new();
+    static readonly ConcurrentDictionary<(Type Source, Type Target), Delegate> MapDelegates = new();
+    static readonly ConcurrentDictionary<(Type Source, Type Target), Delegate> MapToExistingDelegates = new();
 
     internal static TTarget Map<TSource, TTarget>(TSource source)
     {
