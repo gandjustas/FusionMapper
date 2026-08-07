@@ -51,7 +51,10 @@ static class MappingBuilder
         var targetType = typeof(TTarget);
         Stack<(Type Source, Type Target)> path = new();
 
-        var body = BuildMappingBody(sourceParam, targetType, sourceType, path);
+        var body = BuildMappingBody(sourceParam, 
+            targetType, targetNullability: NullabilityState.Unknown, 
+            sourceType: sourceType, sourceNullability: NullabilityState.Unknown, 
+            path: path);
         return Expression.Lambda<Func<TSource, TTarget>>(EnsureType(body, targetType), sourceParam);
     }
 
@@ -88,7 +91,7 @@ static class MappingBuilder
                     path,
                     out var accessExpr))
             {
-                var mappedExpr = BuildMappingBody(accessExpr, targetMemberType, accessExpr.Type, path);
+                var mappedExpr = BuildMappingBody(accessExpr, targetMemberType, targetNullability: NullabilityState.Unknown, sourceType: accessExpr.Type, sourceNullability: NullabilityState.Unknown, path: path);
 
                 var assign = Expression.Assign(
                     Expression.MakeMemberAccess(targetParam, member),
@@ -217,7 +220,7 @@ static class MappingBuilder
         body.Add(Expression.Assign(sourceVar, sourceAccess));
 
         var itemParam = Expression.Parameter(sourceElementType, "item");
-        var mappedItem = BuildMappingBody(itemParam, targetElementType, sourceElementType, path);
+        var mappedItem = BuildMappingBody(itemParam, targetElementType, targetNullability: NullabilityState.Unknown, sourceType: sourceElementType, sourceNullability: NullabilityState.Unknown, path: path);
         var lambda = Expression.Lambda(mappedItem, itemParam);
 
         var selectCall = Expression.Call(
@@ -353,11 +356,12 @@ static class MappingBuilder
     private static Expression BuildMappingBody(
         Expression sourceExpr,
         Type targetType,
-        Type sourceType,
+        NullabilityState targetNullability,
+        Type sourceType, 
+        NullabilityState sourceNullability, 
         Stack<(Type Source, Type Target)> path)
     {
         var pair = (sourceType, targetType);
-
         if (path.Contains(pair))
         {
             throw new MappingException(
@@ -366,10 +370,18 @@ static class MappingBuilder
                 "Recursive and cyclic type graphs are not supported.");
         }
 
-        if (sourceType == targetType)
+        if (targetType.IsAssignableFrom(sourceType))
             return sourceExpr;
 
-        if (!sourceType.IsValueType || Nullable.GetUnderlyingType(sourceType) != null)
+        if (TryConvert(sourceExpr, targetType) is {} e)
+            return e;
+
+
+        if(targetType.IsClass && Nullable.GetUnderlyingType(sourceType) == null)
+        {
+            return BuildNonNullMappingBody(sourceExpr, targetType, sourceType, path);
+        }
+        else
         {
             var nullCheck = Expression.Equal(
                 sourceExpr,
@@ -399,8 +411,6 @@ static class MappingBuilder
                 nonNullBody,
                 targetType);
         }
-
-        return BuildNonNullMappingBody(sourceExpr, targetType, sourceType, path);
     }
 
     private static Expression BuildNonNullMappingBody(
@@ -409,11 +419,6 @@ static class MappingBuilder
         Type sourceType,
         Stack<(Type Source, Type Target)> path)
     {
-        if (targetType.IsAssignableFrom(sourceType))
-            return sourceExpr;
-
-        if (IsSimpleType(targetType) || IsSimpleType(sourceType))
-            return TryConvert(sourceExpr, targetType);
 
         if (IsCollectionType(targetType, out var targetElementType) &&
             IsCollectionType(sourceType, out var sourceElementType))
@@ -551,8 +556,8 @@ static class MappingBuilder
             var mappedExpr = BuildMappingBody(
                 accessExpr,
                 parameter.ParameterType,
-                accessExpr.Type,
-                path);
+                targetNullability: NullabilityState.Unknown, sourceType: accessExpr.Type,
+                sourceNullability: NullabilityState.Unknown, path: path);
 
             args.Add(EnsureType(mappedExpr, parameter.ParameterType));
             initializedNames.Add(parameter.Name!);
@@ -591,8 +596,8 @@ static class MappingBuilder
             var mappedExpr = BuildMappingBody(
                 accessExpr,
                 property.PropertyType,
-                accessExpr.Type,
-                path);
+                targetNullability: NullabilityState.Unknown, sourceType: accessExpr.Type,
+                sourceNullability: NullabilityState.Unknown, path: path);
 
             bindings.Add(Expression.Bind(property, EnsureType(mappedExpr, property.PropertyType)));
             filledNames.Add(property.Name);
@@ -625,8 +630,8 @@ static class MappingBuilder
             var mappedExpr = BuildMappingBody(
                 accessExpr,
                 field.FieldType,
-                accessExpr.Type,
-                path);
+                targetNullability: NullabilityState.Unknown, sourceType: accessExpr.Type,
+                sourceNullability: NullabilityState.Unknown, path: path);
 
             bindings.Add(Expression.Bind(field, EnsureType(mappedExpr, field.FieldType)));
             filledNames.Add(field.Name);
@@ -680,7 +685,7 @@ static class MappingBuilder
         Stack<(Type Source, Type Target)> path)
     {
         var itemParam = Expression.Parameter(sourceElementType, "item");
-        var mappedItem = BuildMappingBody(itemParam, targetElementType, sourceElementType, path);
+        var mappedItem = BuildMappingBody(itemParam, targetElementType, targetNullability: NullabilityState.Unknown, sourceType: sourceElementType, sourceNullability: NullabilityState.Unknown, path: path);
         var lambda = Expression.Lambda(mappedItem, itemParam);
 
         var selectCall = Expression.Call(
@@ -1421,42 +1426,17 @@ static class MappingBuilder
         return Expression.Convert(expression, type);
     }
 
-    private static Expression TryConvert(Expression expr, Type targetType)
+    private static UnaryExpression? TryConvert(Expression expr, Type targetType)
     {
-        if (expr.Type == targetType)
-            return expr;
-
-        if (targetType.IsAssignableFrom(expr.Type))
-            return expr;
-
-        if (expr.Type.IsGenericType && expr.Type.GetGenericTypeDefinition() == typeof(Nullable<>))
+        try
         {
-            var underlying = Nullable.GetUnderlyingType(expr.Type);
-            if (targetType == underlying)
-                return Expression.Convert(expr, targetType);
+            return Expression.Convert(expr, targetType);
+
         }
-        else if (targetType.IsGenericType && targetType.GetGenericTypeDefinition() == typeof(Nullable<>))
+        catch (InvalidOperationException)
         {
-            var underlying = Nullable.GetUnderlyingType(targetType);
-            if (expr.Type == underlying)
-                return Expression.Convert(expr, targetType);
+            return null;            
         }
-
-        return Expression.Convert(expr, targetType);
-    }
-
-    private static bool IsSimpleType(Type type)
-    {
-        type = Nullable.GetUnderlyingType(type) ?? type;
-
-        return type.IsPrimitive ||
-               type.IsEnum ||
-               type == typeof(string) ||
-               type == typeof(decimal) ||
-               type == typeof(DateTime) ||
-               type == typeof(Guid) ||
-               type == typeof(TimeSpan) ||
-               type == typeof(DateTimeOffset);
     }
 
     private static bool IsCollectionType(Type type, out Type? elementType)

@@ -47,7 +47,7 @@ public class PrimitiveMappingTests
     [Test]
     public async Task Map_String_To_String()
     {
-        var source = "Hello";
+        string source = "Hello";
         await Assert.That(source.Map().To<string>()).IsEqualTo("Hello");
     }
 
@@ -124,7 +124,7 @@ public class PrimitiveMappingTests
     {
         int? source = null;
         await Assert.That(() => source.Map().To<int>())
-            .Throws<MappingException>(); // Convert выбросит InvalidOperationException при runtime, но мы обернём в MappingException?
+            .Throws<InvalidOperationException>();
     }
 
     [Test]

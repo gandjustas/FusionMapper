@@ -3,6 +3,7 @@ using System.Linq.Expressions;
 
 namespace FusionMapper;
 
+
 public static class FusionMapper
 {
     public static FusionSource<TSource> Map<TSource>(this TSource source)
@@ -15,10 +16,19 @@ public static class FusionMapper
     static readonly ConcurrentDictionary<(Type Source, Type Target), Delegate> MapToExistingDelegates = new();
     static readonly ConcurrentDictionary<(Type Source, Type Target), Expression> MapLambdaExpressions = new();
 
+    #pragma warning disable S2955
+
     internal static TTarget Map<TSource, TTarget>(TSource source)
     {
-        var del = MapDelegates.GetOrAdd((typeof(TSource), typeof(TTarget)), _ => CompileMapping<TSource, TTarget>());
-        var func = (Func<TSource, TTarget>)del;
+        Type sourceType = typeof(TSource);
+        Type targetType = typeof(TTarget);
+
+        if (source == null && (targetType.IsClass ||  Nullable.GetUnderlyingType(targetType) != null))
+        {
+            return default!;
+        }
+
+        var func = (Func<TSource, TTarget>)MapDelegates.GetOrAdd((sourceType, targetType), _ => CompileMapping<TSource, TTarget>());
         return func(source);
     }
 
@@ -26,7 +36,6 @@ public static class FusionMapper
     {
         if (source == null)
         {
-            ArgumentNullException.ThrowIfNull(target);
             return target;
         }
         ArgumentNullException.ThrowIfNull(target);
@@ -42,6 +51,9 @@ public static class FusionMapper
         // TODO: Add rewrite expression to inline calls .Map().To<T> and Project().To<T> 
         return source.Select(GetCreationLambda<TSource, TTarget>());
     }
+    
+    #pragma warning restore S2955
+
 
     static Expression<Func<TSource, TTarget>> GetCreationLambda<TSource, TTarget>()
     {
@@ -59,6 +71,7 @@ public static class FusionMapper
     }
 
 }
+
 
 public readonly struct FusionSource<TSource>(TSource Value)
 {
