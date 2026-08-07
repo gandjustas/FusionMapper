@@ -13,6 +13,7 @@ public static class FusionMapper
 
     static readonly ConcurrentDictionary<(Type Source, Type Target), Delegate> MapDelegates = new();
     static readonly ConcurrentDictionary<(Type Source, Type Target), Delegate> MapToExistingDelegates = new();
+    static readonly ConcurrentDictionary<(Type Source, Type Target), Expression> MapLambdaExpressions = new();
 
     internal static TTarget Map<TSource, TTarget>(TSource source)
     {
@@ -38,26 +39,23 @@ public static class FusionMapper
 
     internal static IQueryable<TTarget> Project<TSource, TTarget>(IQueryable<TSource> source)
     {
-        // Проекции будут реализованы в Milestone 3
-        throw new NotImplementedException("FusionMapper runtime projection engine is not implemented yet.");
+        // TODO: Add rewrite expression to inline calls .Map().To<T> and Project().To<T> 
+        return source.Select(GetCreationLambda<TSource, TTarget>());
     }
 
+    static Expression<Func<TSource, TTarget>> GetCreationLambda<TSource, TTarget>()
+    {
+        return (Expression<Func<TSource, TTarget>>)MapLambdaExpressions.GetOrAdd((typeof(TSource), typeof(TTarget)), _ => MappingBuilder.BuildCreationLambda<TSource, TTarget>());
+    }
 
     static Delegate CompileMapping<TSource, TTarget>()
     {
-        var sourceParam = Expression.Parameter(typeof(TSource), "source");
-        var body = MappingBuilder.BuildCreationExpression<TSource, TTarget>(sourceParam);
-        var lambda = Expression.Lambda<Func<TSource, TTarget>>(body, sourceParam);
-        return lambda.Compile();
+        return GetCreationLambda<TSource, TTarget>().Compile();
     }
 
     static Delegate CompileMappingToExisting<TSource, TTarget>()
     {
-        var sourceParam = Expression.Parameter(typeof(TSource), "source");
-        var targetParam = Expression.Parameter(typeof(TTarget), "target");
-        var body = MappingBuilder.BuildAssignmentExpression<TSource, TTarget>(sourceParam, targetParam);
-        var lambda = Expression.Lambda<Action<TSource, TTarget>>(body, sourceParam, targetParam);
-        return lambda.Compile();
+        return MappingBuilder.BuildAssignmentExpression<TSource, TTarget>().Compile();
     }
 
 }

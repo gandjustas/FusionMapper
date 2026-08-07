@@ -33,7 +33,7 @@ public class PrimitiveMappingTests
     [Test]
     public async Task Map_Decimal_To_Decimal()
     {
-        var source =  99.99m;
+        var source = 99.99m;
         await Assert.That(source.Map().To<decimal>()).IsEqualTo(99.99m);
     }
 
@@ -94,7 +94,7 @@ public class PrimitiveMappingTests
     [Test]
     public async Task Map_Int_To_Enum()
     {
-        var source = 1 ;
+        var source = 1;
         await Assert.That(source.Map().To<Color>()).IsEqualTo(Color.Green);
     }
 

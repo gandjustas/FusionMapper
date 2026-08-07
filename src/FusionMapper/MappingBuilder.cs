@@ -43,20 +43,24 @@ static class MappingBuilder
         IReadOnlyList<MemberBinding> Bindings,
         int ConstructorParameterCount);
 
-    public static Expression BuildCreationExpression<TSource, TTarget>(ParameterExpression sourceParam)
+    public static Expression<Func<TSource, TTarget>> BuildCreationLambda<TSource, TTarget>()
     {
+        var sourceParam = Expression.Parameter(typeof(TSource), "source");
+
         var sourceType = typeof(TSource);
         var targetType = typeof(TTarget);
         Stack<(Type Source, Type Target)> path = new();
 
         var body = BuildMappingBody(sourceParam, targetType, sourceType, path);
-        return EnsureType(body, targetType);
+        return Expression.Lambda<Func<TSource, TTarget>>(EnsureType(body, targetType), sourceParam);
     }
 
-    public static Expression BuildAssignmentExpression<TSource, TTarget>(
-        ParameterExpression sourceParam,
-        ParameterExpression targetParam)
+    public static Expression<Action<TSource, TTarget>> BuildAssignmentExpression<TSource, TTarget>()
     {
+
+        var sourceParam = Expression.Parameter(typeof(TSource), "source");
+        var targetParam = Expression.Parameter(typeof(TTarget), "target");
+
         var sourceType = typeof(TSource);
         var targetType = typeof(TTarget);
         Stack<(Type Source, Type Target)> path = new();
@@ -136,9 +140,11 @@ static class MappingBuilder
             }
         }
 
-        return bodyExpressions.Count > 0
+        var body = bodyExpressions.Count > 0
             ? Expression.Block(typeof(void), bodyExpressions.ToArray())
-            : Expression.Empty();
+            : throw new MappingException($"No properties were mapped");
+
+        return Expression.Lambda<Action<TSource, TTarget>>(body, sourceParam, targetParam);
     }
 
     private static bool TryBuildReadOnlyCollectionMutation(
