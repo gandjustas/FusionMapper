@@ -28,19 +28,23 @@ public static class FusionMapper
             return default!;
         }
 
-        var func = (Func<TSource, TTarget>)MapDelegates.GetOrAdd((sourceType, targetType), _ => CompileMapping<TSource, TTarget>());
+        var func = (Func<TSource, TTarget>)MapDelegates.GetOrAdd((sourceType, targetType), 
+                _ => GetCreationLambda<TSource, TTarget>().Compile());
         return func(source);
     }
 
     internal static TTarget Map<TSource, TTarget>(TSource source, TTarget target)
     {
+#pragma warning disable S2955
         if (source == null)
         {
             return target;
         }
+#pragma warning restore S2955
         ArgumentNullException.ThrowIfNull(target);
 
-        var del = MapToExistingDelegates.GetOrAdd((typeof(TSource), typeof(TTarget)), _ => CompileMappingToExisting<TSource, TTarget>());
+        var del = MapToExistingDelegates.GetOrAdd((typeof(TSource), typeof(TTarget)), _ =>
+            MappingBuilder.BuildAssignmentExpression<TSource, TTarget>().Compile());
         var action = (Action<TSource, TTarget>)del;
         action(source, target);
         return target;
@@ -51,26 +55,16 @@ public static class FusionMapper
         // TODO: Add rewrite expression to inline calls .Map().To<T> and Project().To<T> 
         return source.Select(GetCreationLambda<TSource, TTarget>());
     }
-    
-    #pragma warning restore S2955
-
 
     static Expression<Func<TSource, TTarget>> GetCreationLambda<TSource, TTarget>()
     {
-        return (Expression<Func<TSource, TTarget>>)MapLambdaExpressions.GetOrAdd((typeof(TSource), typeof(TTarget)), _ => MappingBuilder.BuildCreationLambda<TSource, TTarget>());
+        return (Expression<Func<TSource, TTarget>>)MapLambdaExpressions.GetOrAdd((typeof(TSource), typeof(TTarget)),
+            _ => MappingBuilder.BuildCreationLambda<TSource, TTarget>());
     }
 
-    static Delegate CompileMapping<TSource, TTarget>()
-    {
-        return GetCreationLambda<TSource, TTarget>().Compile();
-    }
-
-    static Delegate CompileMappingToExisting<TSource, TTarget>()
-    {
-        return MappingBuilder.BuildAssignmentExpression<TSource, TTarget>().Compile();
-    }
 
 }
+#pragma warning restore S2955
 
 
 public readonly struct FusionSource<TSource>(TSource Value)

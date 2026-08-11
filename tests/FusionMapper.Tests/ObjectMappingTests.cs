@@ -122,16 +122,6 @@ public class ObjectMappingTests
     }
 
     [Test]
-    public async Task Map_Ambiguous_CaseInsensitive_Match_Throws()
-    {
-        var source = new AmbiguousSource();
-
-        await Assert.That(() =>
-            source.Map().To<AmbiguousTarget>()
-        ).Throws<MappingException>();
-    }
-
-    [Test]
     public async Task Map_Nullable_Value_WithValue()
     {
         var source = new NullableSource

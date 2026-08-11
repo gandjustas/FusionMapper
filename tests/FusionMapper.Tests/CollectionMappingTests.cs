@@ -16,20 +16,6 @@ public class CollectionMappingTests
         await Assert.That(result.Items[1].Name).IsEqualTo("B");
     }
 
-    [Test, Skip("Not implemented call AddRange")]
-    public async Task Map_Object_With_ReadOnly_List_Property()
-    {
-        var source = new OrderSource();
-        source.Items.Add(new ItemSource { Name = "A" });
-        source.Items.Add(new ItemSource { Name = "B" });
-
-        var result = source.Map().To<OrderReadOnlyItemsTarget>();
-
-        await Assert.That(result.Items.Count).IsEqualTo(2);
-        await Assert.That(result.Items[0].Name).IsEqualTo("A");
-        await Assert.That(result.Items[1].Name).IsEqualTo("B");
-    }
-
     [Test]
     public async Task Map_Null_Collection_To_Null_Collection()
     {

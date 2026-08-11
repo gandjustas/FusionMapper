@@ -15,9 +15,9 @@ sealed class MappingPath
         }
     }
 
-    public Scope Push(Type target, Type source, string namePrefix = "")
+    public Scope Push(Type target, Type source)
     {
-        PathElement p = new(target, source) { NamePrefix = namePrefix };
+        PathElement p = new(target, source);
         ThrowIfRecursive(p);
         path.Push(p);
         return new Scope(this);
@@ -31,8 +31,5 @@ sealed class MappingPath
         }
     }
 
-    private readonly record struct PathElement(Type Target, Type Source)
-    {
-        public string NamePrefix { get; init; } = "";
-    }
+    private readonly record struct PathElement(Type Target, Type Source);
 }

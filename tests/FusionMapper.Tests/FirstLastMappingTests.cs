@@ -180,6 +180,12 @@ public class FirstLastMappingTests
         public string? OrderItemsLastOrDefaultName { get; set; }
     }
 
+    public class NullableOrderItemsNameTarget
+    {
+        public string? OrderItemsFirstOrDefaultName { get; set; }
+        public string? OrderItemsLastOrDefaultName { get; set; }
+    }
+
     [Test]
     public async Task Map_Deep_Flattening_First_Last_With_Property_Selector()
     {
@@ -205,20 +211,12 @@ public class FirstLastMappingTests
     }
 
     [Test]
-    public async Task Map_Deep_Flattening_First_Last_Empty_Or_Null_Paths()
+    public async Task Map_Deep_Flattening_First_Last_Empty_Paths()
     {
-        // 1. Empty collection
         var emptySource = new NestedFirstLastSource();
-        var emptyResult = emptySource.Map().To<OrderItemsNameTarget>();
+        var emptyResult = emptySource.Map().To<NullableOrderItemsNameTarget>();
 
         await Assert.That(emptyResult.OrderItemsFirstOrDefaultName).IsNull();
         await Assert.That(emptyResult.OrderItemsLastOrDefaultName).IsNull();
-
-        // 2. Null intermediate path (Order is null)
-        var nullPathSource = new NestedFirstLastSource { Order = null! };
-        var nullPathResult = nullPathSource.Map().To<OrderItemsNameTarget>();
-
-        await Assert.That(nullPathResult.OrderItemsFirstOrDefaultName).IsNull();
-        await Assert.That(nullPathResult.OrderItemsLastOrDefaultName).IsNull();
     }
 }

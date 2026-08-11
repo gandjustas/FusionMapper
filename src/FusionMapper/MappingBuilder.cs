@@ -1,4 +1,4 @@
-using System.Collections;
+using System.Collections.Concurrent;
 using System.Diagnostics.CodeAnalysis;
 using System.Linq.Expressions;
 using System.Reflection;
@@ -8,54 +8,41 @@ namespace FusionMapper;
 
 static class MappingBuilder
 {
-    private enum CollectionOperation
-    {
-        None,
-        Count,
-        Any,
-        Sum,
-        Average,
-        Max,
-        Min,
-        First,
-        FirstOrDefault,
-        Last,
-        LastOrDefault,
-        All
-    }
-
-    private static readonly (string Name, CollectionOperation Operation)[] CollectionOperations = [
-        ("FirstOrDefault", CollectionOperation.FirstOrDefault),
-        ("LastOrDefault", CollectionOperation.LastOrDefault),
-        ("First", CollectionOperation.First),
-        ("Last", CollectionOperation.Last),
-        ("Count", CollectionOperation.Count),
-        ("Average", CollectionOperation.Average),
-        ("Sum", CollectionOperation.Sum),
-        ("Max", CollectionOperation.Max),
-        ("Min", CollectionOperation.Min),
-        ("Any", CollectionOperation.Any),
-        ("All", CollectionOperation.All)
+    private static readonly string[] CollectionOperations = [
+        "FirstOrDefault",
+        "LastOrDefault",
+        "First",
+        "Last",
+        "Count",
+        "Average",
+        "Sum",
+        "Max",
+        "Min",
+        "Any",
+        "All"
     ];
-
-    private sealed record ObjectMappingPlan(
-        NewExpression NewExpression,
-        IReadOnlyList<MemberBinding> Bindings,
-        int ConstructorParameterCount);
 
     public static Expression<Func<TSource, TTarget>> BuildCreationLambda<TSource, TTarget>()
     {
-        var sourceParam = Expression.Parameter(typeof(TSource), "source");
-
         var sourceType = typeof(TSource);
         var targetType = typeof(TTarget);
-        Stack<(Type Source, Type Target)> path = new();
+        var sourceParam = Expression.Parameter(sourceType, "source");
 
-        var body = BuildMappingBody(sourceParam, 
-            targetType, targetNullability: NullabilityState.Unknown, 
-            sourceType: sourceType, sourceNullability: NullabilityState.Unknown, 
-            path: path);
-        return Expression.Lambda<Func<TSource, TTarget>>(EnsureType(body, targetType), sourceParam);
+        MappingPath path = new();
+        using var guard = path.Push(targetType, sourceType);
+
+
+        if (BuildMappingBody(
+            sourceParam, sourceNullability: NullabilityState.Unknown,
+            targetType, targetNullability: NullabilityState.Unknown,
+            path) is { } body)
+        {
+            return Expression.Lambda<Func<TSource, TTarget>>(body, sourceParam);
+        }
+        else
+        {
+            throw new MappingException($"Can't map {sourceParam.Type} to {targetType}.");
+        }
     }
 
     public static Expression<Action<TSource, TTarget>> BuildAssignmentExpression<TSource, TTarget>()
@@ -64,42 +51,40 @@ static class MappingBuilder
         var sourceParam = Expression.Parameter(typeof(TSource), "source");
         var targetParam = Expression.Parameter(typeof(TTarget), "target");
 
-        var sourceType = typeof(TSource);
         var targetType = typeof(TTarget);
-        Stack<(Type Source, Type Target)> path = new();
+        MappingPath path = new();
 
-        List<Expression> bodyExpressions = [];
 
         var writableProperties = targetType
             .GetProperties(BindingFlags.Public | BindingFlags.Instance)
             .Where(p => p.CanWrite && !IsInitOnly(p))
             .Cast<MemberInfo>();
 
+
         var writableFields = targetType
             .GetFields(BindingFlags.Public | BindingFlags.Instance)
             .Where(f => !f.IsInitOnly && !f.IsLiteral)
             .Cast<MemberInfo>();
 
-        foreach (var member in writableProperties.Concat(writableFields))
-        {
-            var targetMemberType = GetMemberType(member);
 
-            if (TryGetSourceMemberAccess(
-                    sourceType,
-                    sourceParam,
-                    member.Name,
-                    path,
-                    out var accessExpr))
+        var assignExpressions = writableProperties
+            .Concat(writableFields)
+            .Select(member =>
             {
-                var mappedExpr = BuildMappingBody(accessExpr, targetMemberType, targetNullability: NullabilityState.Unknown, sourceType: accessExpr.Type, sourceNullability: NullabilityState.Unknown, path: path);
+                var targetType = GetMemberType(member);
+                if (GetSourceMemberAccess(sourceParam, member.Name, NullabilityState.NotNull).FirstOrDefault() is
+                    not (Expression accessExpr, NullabilityState nullability)) return null;
 
-                var assign = Expression.Assign(
-                    Expression.MakeMemberAccess(targetParam, member),
-                    EnsureType(mappedExpr, targetMemberType));
+                using var guard = path.Push(GetMemberType(member), accessExpr.Type);
+                if (BuildMappingBody(accessExpr, nullability,
+                    targetType, GetMemberNullability(member).WriteState,
+                    path) is not { } mappedExpr) return null;
 
-                bodyExpressions.Add(assign);
-            }
-        }
+                return (Expression)Expression.Assign(Expression.MakeMemberAccess(targetParam, member), mappedExpr);
+            })
+            .Where(x => x is not null);
+
+
 
         var readOnlyProperties = targetType
             .GetProperties(BindingFlags.Public | BindingFlags.Instance)
@@ -114,62 +99,49 @@ static class MappingBuilder
             .Where(f => f.IsInitOnly && !f.IsLiteral)
             .Cast<MemberInfo>();
 
-        foreach (var member in readOnlyProperties.Concat(readOnlyFields))
-        {
-            var targetMemberType = GetMemberType(member);
-
-            if (!IsCollectionType(targetMemberType, out _))
-                continue;
-
-            if (!TryGetSourceMemberAccess(
-                    sourceType,
-                    sourceParam,
-                    member.Name,
-                    path,
-                    out var accessExpr))
+        var fillCollecitonExpressions = readOnlyProperties
+            .Concat(readOnlyFields)
+            .Select(member =>
             {
-                continue;
-            }
+                var targetMemberType = GetMemberType(member);
 
-            if (TryBuildReadOnlyCollectionMutation(
-                    targetParam,
-                    member,
-                    targetMemberType,
-                    accessExpr,
-                    path,
-                    out var mutationExpression))
-            {
-                bodyExpressions.Add(mutationExpression);
-            }
-        }
+                if (!IsCollectionType(targetMemberType, out _)) return null;
 
-        var body = bodyExpressions.Count > 0
-            ? Expression.Block(typeof(void), bodyExpressions.ToArray())
-            : throw new MappingException($"No properties were mapped");
+                if (GetSourceMemberAccess(sourceParam, member.Name, NullabilityState.NotNull).FirstOrDefault() is
+                not (Expression accessExpr, NullabilityState _)) return null;
+                // TODO: handle nullable
+                return BuildReadOnlyCollectionMutation(
+                        targetParam,
+                        member,
+                        targetMemberType,
+                        accessExpr,
+                        path);
+            })
+            .Where(x => x is not null);
+
+        var body = Expression.Block(typeof(void), assignExpressions.Concat(fillCollecitonExpressions)!);
+        if (body.Expressions.Count == 0) throw new MappingException($"No properties were mapped");
 
         return Expression.Lambda<Action<TSource, TTarget>>(body, sourceParam, targetParam);
     }
 
-    private static bool TryBuildReadOnlyCollectionMutation(
+    private static BlockExpression? BuildReadOnlyCollectionMutation(
         ParameterExpression targetParam,
         MemberInfo member,
         Type targetCollectionType,
         Expression sourceAccess,
-        Stack<(Type Source, Type Target)> path,
-        out Expression mutationExpression)
+        MappingPath path)
     {
-        mutationExpression = null!;
-
         if (!IsCollectionType(targetCollectionType, out var targetElementType) ||
             targetElementType is null)
         {
-            return false;
+            return null;
         }
 
         if (!IsCollectionType(sourceAccess.Type, out var sourceElementType) ||
             sourceElementType is null)
         {
-            return false;
+            return null;
         }
 
         if (targetCollectionType.IsArray)
@@ -220,7 +192,7 @@ static class MappingBuilder
         body.Add(Expression.Assign(sourceVar, sourceAccess));
 
         var itemParam = Expression.Parameter(sourceElementType, "item");
-        var mappedItem = BuildMappingBody(itemParam, targetElementType, targetNullability: NullabilityState.Unknown, sourceType: sourceElementType, sourceNullability: NullabilityState.Unknown, path: path);
+        var mappedItem = BuildMappingBody(itemParam, sourceNullability: NullabilityState.Unknown, targetType: targetElementType, targetNullability: NullabilityState.Unknown, path: path);
         var lambda = Expression.Lambda(mappedItem, itemParam);
 
         var selectCall = Expression.Call(
@@ -284,12 +256,11 @@ static class MappingBuilder
             body.Add(loop);
         }
 
-        mutationExpression = Expression.Block(
+        return Expression.Block(
             typeof(void),
             [existingVar, sourceVar, mappedListVar, iVar],
             body);
 
-        return true;
     }
 
     private static MethodInfo? FindCollectionClearMethod(Type type)
@@ -353,49 +324,50 @@ static class MappingBuilder
                 m.GetParameters()[0].ParameterType.IsAssignableFrom(elementType));
     }
 
-    private static Expression BuildMappingBody(
+    private static Expression? BuildMappingBody(
         Expression sourceExpr,
+        NullabilityState sourceNullability,
         Type targetType,
         NullabilityState targetNullability,
-        Type sourceType, 
-        NullabilityState sourceNullability, 
-        Stack<(Type Source, Type Target)> path)
+        MappingPath path)
     {
-        var pair = (sourceType, targetType);
-        if (path.Contains(pair))
-        {
-            throw new MappingException(
-                $"Recursive mapping detected between '{sourceType.FullName}' and '{targetType.FullName}'. " +
-                $"Path: {string.Join(" -> ", path.Select(p => p.Source.Name + "->" + p.Target.Name))} -> {sourceType.Name}. " +
-                "Recursive and cyclic type graphs are not supported.");
-        }
+        if (targetType.IsPointer || targetType.IsFunctionPointer) return null;
+
+        var sourceType = sourceExpr.Type;
 
         if (targetType.IsAssignableFrom(sourceType))
+        {
+            if (targetType != sourceType && targetType.IsValueType && Nullable.GetUnderlyingType(targetType) != null)
+                return Expression.Convert(sourceExpr, targetType);
             return sourceExpr;
-
-        if (TryConvert(sourceExpr, targetType) is {} e)
+        }
+        if (sourceType.IsValueType 
+            && targetType.IsValueType 
+            && TryConvert(sourceExpr, targetType) is { } e)
             return e;
 
+        if (targetType.IsPrimitive) return null;
 
-        if(targetType.IsClass && Nullable.GetUnderlyingType(sourceType) == null)
+        var sourceCanBeNull =
+            CanBeNull(sourceType) &&
+            sourceNullability != NullabilityState.NotNull;
+
+        var targetAcceptsNull =
+            CanBeNull(targetType) &&
+            targetNullability != NullabilityState.NotNull;
+
+        var nonNullBody = BuildNonNullMappingBody(sourceExpr, NullabilityState.NotNull, targetType, path);
+        if (sourceCanBeNull && nonNullBody is not null)
         {
-            return BuildNonNullMappingBody(sourceExpr, targetType, sourceType, path);
-        }
-        else
-        {
-            var nullCheck = Expression.Equal(
-                sourceExpr,
-                Expression.Constant(null, sourceType));
+            Expression nullBranch;
 
-            Expression defaultTarget;
-
-            if (targetType.IsClass || Nullable.GetUnderlyingType(targetType) != null)
+            if (targetAcceptsNull || Nullable.GetUnderlyingType(targetType) is not null)
             {
-                defaultTarget = Expression.Default(targetType);
+                nullBranch = Expression.Default(targetType);
             }
             else
             {
-                defaultTarget = Expression.Throw(
+                nullBranch = Expression.Throw(
                     Expression.New(
                         typeof(MappingException).GetConstructor([typeof(string)])!,
                         Expression.Constant(
@@ -403,25 +375,25 @@ static class MappingBuilder
                     targetType);
             }
 
-            var nonNullBody = BuildNonNullMappingBody(sourceExpr, targetType, sourceType, path);
-
             return Expression.Condition(
-                nullCheck,
-                defaultTarget,
+                Expression.Equal(sourceExpr, Expression.Constant(null, sourceType)),
+                nullBranch,
                 nonNullBody,
                 targetType);
         }
+
+        return nonNullBody;
     }
 
-    private static Expression BuildNonNullMappingBody(
+    private static Expression? BuildNonNullMappingBody(
         Expression sourceExpr,
+        NullabilityState sourceNullability,
         Type targetType,
-        Type sourceType,
-        Stack<(Type Source, Type Target)> path)
+        MappingPath path)
     {
-
-        if (IsCollectionType(targetType, out var targetElementType) &&
-            IsCollectionType(sourceType, out var sourceElementType))
+        var sourceType = sourceExpr.Type;
+        if (IsCollectionType(targetType, out var targetElementType)
+            && IsCollectionType(sourceType, out var sourceElementType))
         {
             return BuildCollectionMapping(
                 sourceExpr,
@@ -431,236 +403,155 @@ static class MappingBuilder
                 path);
         }
 
-        return BuildObjectMapping(sourceExpr, targetType, sourceType, path);
+        if (TryConvert(sourceExpr, targetType) is { } e)
+            return e;
+
+
+        return BuildObjectMapping(sourceExpr, sourceNullability, targetType, path);
     }
 
-    private static Expression BuildObjectMapping(
+    private static MemberInitExpression BuildObjectMapping(
     Expression sourceExpr,
+    NullabilityState sourceNullability,
     Type targetType,
-    Type sourceType,
-    Stack<(Type Source, Type Target)> path)
+    MappingPath path)
     {
-        path.Push((sourceType, targetType));
 
-        try
-        {
-            var constructors = targetType
-                .GetConstructors(BindingFlags.Public | BindingFlags.Instance)
-                .OrderByDescending(c => c.GetParameters().Length)
-                .ToArray();
+        var bindings = BuildMemberAssignments(sourceExpr, sourceNullability, targetType, path).ToArray();
+        var assignedMembers = bindings.Select(m => m.Member.Name);
+        var requredMembers = GetRequiredMemberNames(targetType);
+        var needToAssign = requredMembers.Except(assignedMembers, StringComparer.Ordinal).ToArray();
 
-            ObjectMappingPlan? bestPlan = null;
-            int? bestParameterCount = null;
-            string? lastFailure = null;
 
-            foreach (var constructor in constructors)
-            {
-                var parameterCount = constructor.GetParameters().Length;
-
-                // Если уже есть подходящий конструктор с большим числом параметров,
-                // конструкторы с меньшим числом параметров не рассматриваем.
-                if (bestPlan is not null && parameterCount < bestParameterCount!.Value)
-                    break;
-
-                if (!TryBuildConstructorPlan(
-                        constructor,
-                        sourceType,
-                        sourceExpr,
-                        targetType,
-                        path,
-                        out var plan,
-                        out var failureReason))
-                {
-                    lastFailure = failureReason;
-                    continue;
-                }
-
-                // Если найдено несколько полностью bindable-конструкторов
-                // с одинаковым количеством параметров, это неоднозначность.
-                if (bestPlan is not null)
-                {
-                    throw new MappingException(
-                        $"Ambiguous constructor selection for type '{targetType.FullName}'. " +
-                        $"Found multiple constructors with {parameterCount} bindable parameter(s).");
-                }
-
-                bestPlan = plan;
-                bestParameterCount = parameterCount;
-            }
-
-            if (bestPlan is null)
-            {
-                if (lastFailure is not null &&
-                    lastFailure.StartsWith("required:", StringComparison.Ordinal))
-                {
-                    var requiredMember = lastFailure["required:".Length..];
-
-                    throw new MappingException(
-                        $"Required member '{requiredMember}' cannot be mapped from source type '{sourceType.FullName}'.");
-                }
-
-                if (lastFailure is not null &&
-                    lastFailure.StartsWith("ctor:", StringComparison.Ordinal))
-                {
-                    var parameterName = lastFailure["ctor:".Length..];
-
-                    throw new MappingException(
-                        $"Constructor parameter '{parameterName}' of type '{targetType.FullName}' cannot be mapped from source type '{sourceType.FullName}'.");
-                }
-
-                throw new MappingException(
-                    $"No suitable constructor found for type '{targetType.FullName}'.");
-            }
-
-            return bestPlan.Bindings.Count > 0
-                ? Expression.MemberInit(bestPlan.NewExpression, bestPlan.Bindings)
-                : bestPlan.NewExpression;
-        }
-        finally
-        {
-            path.Pop();
-        }
-    }
-
-    private static bool TryBuildConstructorPlan(
-    ConstructorInfo constructor,
-    Type sourceType,
-    Expression sourceExpr,
-    Type targetType,
-    Stack<(Type Source, Type Target)> path,
-    out ObjectMappingPlan plan,
-    out string? failureReason)
-    {
-        plan = null!;
-        failureReason = null;
-
-        var parameters = constructor.GetParameters();
-
-        List<Expression> args = [];
-        HashSet<string> initializedNames = new(StringComparer.OrdinalIgnoreCase);
-
-        // 1. Маппим все аргументы конструктора.
-        foreach (var parameter in parameters)
-        {
-            if (!TryGetSourceMemberAccess(
-                    sourceType,
-                    sourceExpr,
-                    parameter.Name!,
-                    path,
-                    out var accessExpr))
-            {
-                failureReason = $"ctor:{parameter.Name}";
-                return false;
-            }
-
-            var mappedExpr = BuildMappingBody(
-                accessExpr,
-                parameter.ParameterType,
-                targetNullability: NullabilityState.Unknown, sourceType: accessExpr.Type,
-                sourceNullability: NullabilityState.Unknown, path: path);
-
-            args.Add(EnsureType(mappedExpr, parameter.ParameterType));
-            initializedNames.Add(parameter.Name!);
-        }
-
-        var newExpression = args.Count > 0
-            ? Expression.New(constructor, args)
-            : Expression.New(constructor);
-
-        List<MemberBinding> bindings = [];
-        HashSet<string> filledNames = new(StringComparer.OrdinalIgnoreCase);
-
-        // 2. Маппим settable или init-only свойства,
-        //    имена которых не совпадают с аргументами конструктора.
-        var settableOrInitOnlyProperties = targetType
-            .GetProperties(BindingFlags.Public | BindingFlags.Instance)
-            .Where(p => p.GetIndexParameters().Length == 0)
-            .Where(p => p.SetMethod is { IsPublic: true })
+        var constructors = targetType
+            .GetConstructors(BindingFlags.Public | BindingFlags.Instance)
+            .OrderByDescending(c => c.GetParameters().Length)
+            .Select(c => BuildConstructorCall(c, sourceExpr, sourceNullability, path))
+            .Where(p => p != null)
+            .Select(p => p.Value)
             .ToArray();
+
+        if (constructors.Length == 0) throw new MappingException($"No suitable constructor found for type '{targetType.FullName}'.");
+
+        string[] unassigned = [];
+        foreach (var (ex, args) in constructors)
+        {
+            unassigned = [.. needToAssign.Except(args, StringComparer.Ordinal)];
+            if (ex.Constructor!.GetCustomAttribute<SetsRequiredMembersAttribute>() is { } || unassigned.Length == 0)
+            {
+                return Expression.MemberInit(ex, bindings);
+            }
+        }
+        throw new MappingException($"Required members of type '{targetType.FullName}' is not mapped: {string.Join(',', unassigned.Select(x => "'" + x + "'"))}.");
+    }
+
+    private static IEnumerable<MemberAssignment> BuildMemberAssignments(
+    Expression sourceExpr,
+    NullabilityState sourceNullability,
+    Type targetType,
+    MappingPath path)
+    {
+        List<string> initializedNames = [];
+
+        var settableOrInitOnlyProperties = targetType
+        .GetProperties(BindingFlags.Public | BindingFlags.Instance)
+        .Where(p => p.GetIndexParameters().Length == 0)
+        .Where(p => p.SetMethod is { IsPublic: true });
 
         foreach (var property in settableOrInitOnlyProperties)
         {
-            if (initializedNames.Contains(property.Name))
-                continue;
+            Expression? mappedExpr = null;
 
-            if (!TryGetSourceMemberAccess(
-                    sourceType,
-                    sourceExpr,
-                    property.Name,
-                    path,
-                    out var accessExpr))
+            if (GetSourceMemberAccess(sourceExpr, property.Name!, sourceNullability).FirstOrDefault()
+                    is (Expression accessExpr, NullabilityState nullability))
             {
-                continue;
+                using var guard = path.Push(property.PropertyType, accessExpr.Type);
+                mappedExpr = BuildMappingBody(accessExpr,
+                    nullability,
+                    targetType: property.PropertyType, SafeNullability(property).WriteState,
+                    path);
             }
 
-            var mappedExpr = BuildMappingBody(
-                accessExpr,
-                property.PropertyType,
-                targetNullability: NullabilityState.Unknown, sourceType: accessExpr.Type,
-                sourceNullability: NullabilityState.Unknown, path: path);
-
-            bindings.Add(Expression.Bind(property, EnsureType(mappedExpr, property.PropertyType)));
-            filledNames.Add(property.Name);
+            if (mappedExpr != null)
+            {
+                initializedNames.Add(property.Name);
+                yield return Expression.Bind(property, mappedExpr);
+            }
         }
 
-        // 3. Маппим публичные поля.
-        //    Под полями здесь понимаются публичные instance-поля,
-        //    которые можно использовать в инициализаторе:
-        //    не const и не readonly.
+
         var publicFields = targetType
             .GetFields(BindingFlags.Public | BindingFlags.Instance)
-            .Where(f => !f.IsLiteral && !f.IsInitOnly)
-            .ToArray();
+            .Where(f => !initializedNames.Contains(f.Name))
+            .Where(f => !f.IsLiteral && !f.IsInitOnly);
 
         foreach (var field in publicFields)
         {
-            if (initializedNames.Contains(field.Name))
-                continue;
+            Expression? mappedExpr = null;
 
-            if (!TryGetSourceMemberAccess(
-                    sourceType,
-                    sourceExpr,
-                    field.Name,
-                    path,
-                    out var accessExpr))
+            if (GetSourceMemberAccess(sourceExpr, field.Name!, sourceNullability).FirstOrDefault()
+                is (Expression accessExpr, NullabilityState nullability))
             {
-                continue;
+                using var guard = path.Push(field.FieldType, accessExpr.Type);
+                mappedExpr = BuildMappingBody(accessExpr, nullability,
+                    field.FieldType, SafeNullability(field).WriteState,
+                    path);
             }
 
-            var mappedExpr = BuildMappingBody(
-                accessExpr,
-                field.FieldType,
-                targetNullability: NullabilityState.Unknown, sourceType: accessExpr.Type,
-                sourceNullability: NullabilityState.Unknown, path: path);
-
-            bindings.Add(Expression.Bind(field, EnsureType(mappedExpr, field.FieldType)));
-            filledNames.Add(field.Name);
-        }
-
-        // 4. Проверяем required-члены, если конструктор
-        //    не помечен SetsRequiredMembersAttribute.
-        if (constructor.GetCustomAttribute<SetsRequiredMembersAttribute>() is null)
-        {
-            foreach (var requiredMember in GetRequiredMemberNames(targetType))
+            if (mappedExpr != null)
             {
-                if (!initializedNames.Contains(requiredMember) &&
-                    !filledNames.Contains(requiredMember))
-                {
-                    failureReason = $"required:{requiredMember}";
-                    return false;
-                }
+                yield return Expression.Bind(field, mappedExpr);
             }
         }
 
-        plan = new ObjectMappingPlan(
-            NewExpression: newExpression,
-            Bindings: bindings,
-            ConstructorParameterCount: parameters.Length);
-
-        return true;
     }
 
-    private static string[] GetRequiredMemberNames(Type targetType)
+    private static (NewExpression Expression, IEnumerable<string> Args)? BuildConstructorCall(
+    ConstructorInfo constructor,
+    Expression sourceExpr,
+    NullabilityState sourceNullability,
+    MappingPath path)
+    {
+
+        List<string> initializedNames = [];
+        List<Expression> args = [];
+
+        // 1. Маппим все аргументы конструктора.
+        foreach (var parameter in constructor.GetParameters())
+        {
+            var paramNullability = SafeNullability(parameter).WriteState;
+            Expression? mappedExpr = null;
+            if (GetSourceMemberAccess(
+                    sourceExpr,
+                    parameter.Name!,
+                    sourceNullability).FirstOrDefault() is (Expression accessExpr, NullabilityState nullability))
+            {
+                using var guard = path.Push(parameter.ParameterType, accessExpr.Type);
+                mappedExpr = BuildMappingBody(accessExpr, nullability,
+                    parameter.ParameterType, paramNullability,
+                    path: path);
+            }
+
+            if (mappedExpr != null)
+            {
+                args.Add(mappedExpr);
+                initializedNames.Add(parameter.Name!);
+            }
+            else
+            {
+                if (paramNullability != NullabilityState.Nullable) return null;
+                args.Add(Expression.Constant(null, parameter.ParameterType));
+            }
+
+        }
+
+        return (args.Count > 0
+            ? Expression.New(constructor, args)
+            : Expression.New(constructor), initializedNames);
+
+    }
+
+    private static IEnumerable<string> GetRequiredMemberNames(Type targetType)
     {
         var properties = targetType
             .GetProperties(BindingFlags.Public | BindingFlags.Instance)
@@ -672,20 +563,20 @@ static class MappingBuilder
             .Where(f => f.GetCustomAttribute<RequiredMemberAttribute>() is not null)
             .Select(f => f.Name);
 
-        return [.. properties
-            .Concat(fields)
-            .Distinct(StringComparer.OrdinalIgnoreCase)];
+        return properties.Concat(fields);
     }
 
-    private static Expression BuildCollectionMapping(
+    private static Expression? BuildCollectionMapping(
         Expression sourceExpr,
         Type sourceElementType,
         Type targetElementType,
         Type targetCollectionType,
-        Stack<(Type Source, Type Target)> path)
+        MappingPath path)
     {
         var itemParam = Expression.Parameter(sourceElementType, "item");
-        var mappedItem = BuildMappingBody(itemParam, targetElementType, targetNullability: NullabilityState.Unknown, sourceType: sourceElementType, sourceNullability: NullabilityState.Unknown, path: path);
+        if (BuildMappingBody(itemParam, NullabilityState.NotNull,
+            targetElementType, NullabilityState.Unknown,
+            path) is not { } mappedItem) return null;
         var lambda = Expression.Lambda(mappedItem, itemParam);
 
         var selectCall = Expression.Call(
@@ -750,642 +641,152 @@ static class MappingBuilder
         throw new MappingException($"Cannot map collection to type '{targetCollectionType.FullName}'.");
     }
 
-    private static bool TryGetSourceMemberAccess(
-        Type sourceType,
-        Expression sourceExpr,
-        string targetMemberName,
-        Stack<(Type Source, Type Target)> path,
-        out Expression accessExpr)
-    {
-        if (TryResolveSuffix(sourceType, sourceExpr, targetMemberName, path, out accessExpr))
-            return true;
 
-        accessExpr = null!;
-        return false;
-    }
-
-    private static bool TryResolveSuffix(
-        Type sourceType,
+    private static IEnumerable<(Expression Expression, NullabilityState Nullability)> GetSourceMemberAccess(
         Expression sourceExpr,
         string suffix,
-        Stack<(Type Source, Type Target)> path,
-        out Expression result)
+        NullabilityState nullability)
     {
-        if (TryResolveSuffixCore(sourceType, sourceExpr, suffix, path, exactOnly: true, out result))
-            return true;
-
-        if (TryResolveSuffixCore(sourceType, sourceExpr, suffix, path, exactOnly: false, out result))
-            return true;
-
-        result = null!;
-        return false;
-    }
-
-    private static bool TryResolveSuffixCore(
-        Type sourceType,
-        Expression sourceExpr,
-        string suffix,
-        Stack<(Type Source, Type Target)> path,
-        bool exactOnly,
-        out Expression result)
-    {
-        result = null!;
-
-        if (suffix.Length == 0)
+        if (string.IsNullOrEmpty(suffix))
         {
-            result = sourceExpr;
-            return true;
+            yield return (sourceExpr, nullability);
+            yield break;
         }
 
-        if (TryGetDirectSourceMember(sourceType, suffix, exactOnly, out var directMember))
-        {
-            result = Expression.MakeMemberAccess(sourceExpr, directMember);
-            return true;
-        }
+        if (suffix.StartsWith('_')) suffix = suffix[1..];
 
-        var nullableUnderlying = Nullable.GetUnderlyingType(sourceType);
-        if (nullableUnderlying is not null)
-        {
-            var valueAccess = Expression.Property(sourceExpr, "Value");
+        var sourceType = sourceExpr.Type;
+        var candidates = GetSourceMembers(sourceType).ToList();
 
-            if (TryResolveSuffixCore(
-                    nullableUnderlying,
-                    valueAccess,
-                    suffix,
-                    path,
-                    exactOnly,
-                    out var nullableNested))
+        var exectMatches = candidates.Where(m => suffix.StartsWith(m.Name, StringComparison.Ordinal)).ToArray();
+        var caseInsesitiveMathes = candidates.Except(exectMatches).Where(m => suffix.StartsWith(m.Name, StringComparison.OrdinalIgnoreCase));
+
+        foreach (var match in exectMatches.Concat(caseInsesitiveMathes))
+        {
+            var rec = GetSourceMemberAccess(
+                Expression.MakeMemberAccess(sourceExpr, match),
+                suffix[match.Name.Length..],
+                nullability == NullabilityState.NotNull ? GetMemberNullability(match).ReadState : nullability);
+
+            foreach (var (ex, n) in rec)
             {
-                result = WrapNullSafe(sourceExpr, nullableNested);
-                return true;
+                yield return (nullability == NullabilityState.NotNull ? ex : WrapNullCoalescingOperator(sourceExpr, ex), n);
             }
         }
 
-        var comparison = exactOnly
-            ? StringComparison.Ordinal
-            : StringComparison.OrdinalIgnoreCase;
-
-        var prefixMembers = GetSourceMembers(sourceType)
-            .Where(m =>
-                suffix.Length > m.Name.Length &&
-                suffix.StartsWith(m.Name, comparison))
-            .OrderByDescending(m => m.Name.Length)
-            .ToArray();
-
-        foreach (var member in prefixMembers)
+        if (sourceType.GetInterfaces()
+            .FirstOrDefault(i => i.IsGenericType && i.GetGenericTypeDefinition() == typeof(IEnumerable<>))
+            is { } enumerable)
         {
-            var remaining = suffix[member.Name.Length..].TrimStart('_');
-            if (remaining.Length == 0)
-                continue;
+            var elementType = enumerable.GetGenericArguments()[0];
+            candidates = [.. GetSourceMembers(elementType)];
 
-            var memberAccess = Expression.MakeMemberAccess(sourceExpr, member);
+            foreach (var op in CollectionOperations)
+            {
+                var aggregateNullability = op is "FirstOrDefault" or "LastOrDefault" ? NullabilityState.Nullable : NullabilityState.NotNull;
+                var resultNullability = nullability == NullabilityState.NotNull ? aggregateNullability : nullability;
+
+                if (suffix.StartsWith(op, StringComparison.Ordinal)
+                    && GetSourceMemberCollectionAggregates(sourceExpr, op, elementType) is { } x)
+                {
+                    var rec = GetSourceMemberAccess(x, suffix[op.Length..], resultNullability);
+
+                    foreach (var (ex, n) in rec)
+                    {
+                        yield return (nullability == NullabilityState.NotNull ? ex : WrapNullCoalescingOperator(sourceExpr, ex), n);
+                    }
+                    break;
+                }
+                else
+                {
+                    if (candidates
+                        .Where(m => suffix.StartsWith(m.Name + op, StringComparison.Ordinal))
+                        .Select(m => (Expresstion: GetSourceMemberCollectionAggregates(sourceExpr, op, elementType, m), Member: m))
+                        .FirstOrDefault(x => x.Expresstion != null) is ({ } x1, { } m))
+                    {
+                        var rec = GetSourceMemberAccess(x1, suffix[(m.Name + op).Length..], resultNullability);
+
+                        foreach (var (ex, n) in rec)
+                        {
+                            yield return (nullability == NullabilityState.NotNull ? ex : WrapNullCoalescingOperator(sourceExpr, ex), n);
+                        }
+                        break;
+                    }
+                }
+            }
+        }
+    }
+
+    private static Expression? GetSourceMemberCollectionAggregates(Expression source, string op, Type elementType, MemberInfo? member = null)
+    {
+
+        if (member is null)
+        {
+            foreach (var method in GetEnumerableMethods(source, op, elementType, 1))
+            {
+                var parameters = method.GetParameters();
+                if (parameters.Length == 1)
+                {
+                    return Expression.Call(null, method, source);
+                }
+            }
+        }
+        else
+        {
+            var p = Expression.Parameter(elementType);
+            var lambda = Expression.Lambda(Expression.MakeMemberAccess(p, member), p);
+            foreach (var method in GetEnumerableMethods(source, op, elementType, 2))
+            {
+                var parameters = method.GetParameters();
+                if (parameters[1].ParameterType == lambda.Type)
+                {
+                    return Expression.Call(null, method, source, lambda);
+                }
+            }
+
             var memberType = GetMemberType(member);
-
-            if (TryResolveSuffixCore(
-                    memberType,
-                    memberAccess,
-                    remaining,
-                    path,
-                    exactOnly,
-                    out var nested))
+            var selectCall = Expression.Call(
+                typeof(Enumerable),
+                nameof(Enumerable.Select),
+                [elementType, memberType],
+                source,
+                lambda);
+            foreach (var method in GetEnumerableMethods(selectCall, op, memberType, 1))
             {
-                result = WrapNullSafe(memberAccess, nested);
-                return true;
-            }
-        }
-
-        if (exactOnly &&
-            IsCollectionType(sourceType, out var elementType) &&
-            elementType is not null)
-        {
-            foreach (var (Name, Operation) in CollectionOperations.OrderByDescending(o => o.Name.Length))
-            {
-                if (!suffix.StartsWith(Name, StringComparison.Ordinal))
-                    continue;
-
-                var remaining = suffix[Name.Length..].TrimStart('_');
-
-                if (!TryBuildOperationExpression(
-                        sourceExpr,
-                        elementType,
-                        Operation,
-                        sequence: null,
-                        sequenceElementType: null,
-                        out var operationExpr))
+                var parameters = method.GetParameters();
+                if (parameters.Length == 1)
                 {
-                    continue;
-                }
-
-                if (remaining.Length == 0)
-                {
-                    result = operationExpr;
-                    return true;
-                }
-
-                if (TryResolveSuffixCore(
-                        operationExpr.Type,
-                        operationExpr,
-                        remaining,
-                        path,
-                        exactOnly,
-                        out var nested))
-                {
-                    result = WrapNullSafe(operationExpr, nested);
-                    return true;
-                }
-            }
-
-            if (TryResolveCollectionSuffixOperation(
-                    sourceExpr,
-                    elementType,
-                    suffix,
-                    path,
-                    out result))
-            {
-                return true;
-            }
-        }
-
-        if (IsCollectionType(sourceType, out elementType) && elementType is not null)
-        {
-            // Уже есть операция как префикс, например:
-            // CollectionFirstDateYear -> source.Collection.First().Date.Year
-            //
-            // Уже может быть операция как суффикс, например:
-            // CollectionDateFirst -> source.Collection.Select(x => x.Date).First()
-
-            // Дополнительный кандидатный поиск:
-            // property(T) + operation
-            if (TryResolveCollectionElementPropertyOperation(
-                    sourceExpr,
-                    elementType,
-                    suffix,
-                    path,
-                    exactOnly,
-                    out result))
-            {
-                return true;
-            }
-        }
-        return false;
-    }
-
-
-    private static bool TryResolveCollectionElementPropertyOperation(
-        Expression collectionExpr,
-        Type elementType,
-        string suffix,
-        Stack<(Type Source, Type Target)> path,
-        bool exactOnly,
-        out Expression result)
-    {
-        result = null!;
-
-        var memberComparison = exactOnly
-            ? StringComparison.Ordinal
-            : StringComparison.OrdinalIgnoreCase;
-
-        var elementMembers = GetSourceMembers(elementType)
-            .OrderByDescending(m => m.Name.Length)
-            .ToArray();
-
-        foreach (var member in elementMembers)
-        {
-            if (suffix.Length <= member.Name.Length)
-                continue;
-
-            if (!suffix.StartsWith(member.Name, memberComparison))
-                continue;
-
-            var afterMember = suffix[member.Name.Length..].TrimStart('_');
-
-            if (afterMember.Length == 0)
-                continue;
-
-            foreach (var (Name, Operation) in GetCollectionOperations())
-            {
-                // Операторы всегда матчим точно.
-                if (!afterMember.StartsWith(Name, StringComparison.Ordinal))
-                    continue;
-
-                var remaining = afterMember[Name.Length..].TrimStart('_');
-
-                var itemParam = Expression.Parameter(elementType, "item");
-                Expression selectorBody = Expression.MakeMemberAccess(itemParam, member);
-
-                if (CanBeNull(elementType))
-                {
-                    selectorBody = Expression.Condition(
-                        Expression.Equal(itemParam, Expression.Constant(null, elementType)),
-                        Expression.Default(selectorBody.Type),
-                        selectorBody,
-                        selectorBody.Type);
-                }
-
-                if (Operation == CollectionOperation.All)
-                {
-                    var normalizedBoolSelector = NormalizeBooleanExpression(selectorBody);
-
-                    if (normalizedBoolSelector is null)
-                        continue;
-
-                    selectorBody = normalizedBoolSelector;
-                }
-
-                var lambda = Expression.Lambda(selectorBody, itemParam);
-
-                var sequence = Expression.Call(
-                    typeof(Enumerable),
-                    nameof(Enumerable.Select),
-                    [elementType, selectorBody.Type],
-                    collectionExpr,
-                    lambda);
-
-                if (!TryBuildOperationExpression(
-                        collectionExpr,
-                        elementType,
-                        Operation,
-                        sequence,
-                        selectorBody.Type,
-                        out var operationExpr))
-                {
-                    continue;
-                }
-
-                if (remaining.Length == 0)
-                {
-                    result = operationExpr;
-                    return true;
-                }
-
-                if (TryResolveSuffixCore(
-                        operationExpr.Type,
-                        operationExpr,
-                        remaining,
-                        path,
-                        exactOnly,
-                        out var nested))
-                {
-                    result = WrapNullSafe(operationExpr, nested);
-                    return true;
+                    return Expression.Call(null, method, selectCall);
                 }
             }
         }
-
-        return false;
-    }
-
-    private static Expression? NormalizeBooleanExpression(Expression expression)
-    {
-        if (expression.Type == typeof(bool))
-            return expression;
-
-        if (expression.Type == typeof(bool?))
-        {
-            return Expression.Equal(
-                expression,
-                Expression.Constant(true, typeof(bool?)));
-        }
-
         return null;
     }
 
-    private static bool TryResolveCollectionSuffixOperation(
-        Expression collectionExpr,
-        Type elementType,
-        string suffix,
-        Stack<(Type Source, Type Target)> path,
-        out Expression result)
-    {
-        result = null!;
-
-        foreach (var (Name, Operation) in CollectionOperations.OrderByDescending(o => o.Name.Length))
-        {
-            if (!suffix.EndsWith(Name, StringComparison.Ordinal))
-                continue;
-
-            var selectorSuffix = suffix[..^Name.Length].TrimEnd('_');
-
-            Expression sequence = collectionExpr;
-            Type projectedType = elementType;
-
-            if (selectorSuffix.Length > 0)
+    private static IEnumerable<MethodInfo> GetEnumerableMethods(Expression source, string op, Type elementType, int parameterCount) =>
+        typeof(Enumerable)
+            .GetMethods(BindingFlags.Public | BindingFlags.Static)
+            .Where(m => m.Name == op)
+            .Where(m => !m.IsGenericMethod || m.GetGenericArguments().Length == 1)
+            .Select(m => m.IsGenericMethod ? m.MakeGenericMethod(elementType) : m)
+            .Where(m =>
             {
-                if (Operation == CollectionOperation.Count ||
-                    Operation == CollectionOperation.Any)
-                {
-                    continue;
-                }
+                var ps = m.GetParameters();
+                return ps.Length == parameterCount && ps is [{ } p] && p.ParameterType.IsAssignableFrom(source.Type);
+            });
 
-                var itemParam = Expression.Parameter(elementType, "item");
-
-                if (!TryResolveSuffix(elementType, itemParam, selectorSuffix, path, out var selectorBody))
-                    continue;
-
-                if (CanBeNull(elementType))
-                {
-                    selectorBody = Expression.Condition(
-                        Expression.Equal(itemParam, Expression.Constant(null, elementType)),
-                        Expression.Default(selectorBody.Type),
-                        selectorBody,
-                        selectorBody.Type);
-                }
-
-                var lambda = Expression.Lambda(selectorBody, itemParam);
-
-                sequence = Expression.Call(
-                    typeof(Enumerable),
-                    nameof(Enumerable.Select),
-                    [elementType, selectorBody.Type],
-                    collectionExpr,
-                    lambda);
-
-                projectedType = selectorBody.Type;
-            }
-
-            if (TryBuildOperationExpression(
-                    collectionExpr,
-                    elementType,
-                    Operation,
-                    sequence,
-                    projectedType,
-                    out result))
-            {
-                return true;
-            }
-        }
-
-        return false;
-    }
-
-    private static Expression WrapNullSafe(Expression baseExpression, Expression nested)
+    private static ConditionalExpression WrapNullCoalescingOperator(Expression source, Expression target)
     {
-        if (!CanBeNull(baseExpression.Type))
-            return nested;
-
-        var resultType = nested.Type;
-
-        if (resultType.IsValueType && Nullable.GetUnderlyingType(resultType) is null)
+        var targetType = target.Type;
+        if (targetType.IsValueType && Nullable.GetUnderlyingType(targetType) == null)
         {
-            resultType = typeof(Nullable<>).MakeGenericType(resultType);
-            nested = Expression.Convert(nested, resultType);
+            targetType = typeof(Nullable<>).MakeGenericType(targetType);
         }
-
         return Expression.Condition(
-            Expression.Equal(baseExpression, Expression.Constant(null, baseExpression.Type)),
-            Expression.Default(resultType),
-            nested,
-            resultType);
-    }
-
-    private static bool TryBuildOperationExpression(
-        Expression collectionExpr,
-        Type collectionElementType,
-        CollectionOperation operation,
-        Expression? sequence,
-        Type? sequenceElementType,
-        out Expression result)
-    {
-        result = null!;
-
-        var effectiveSequence = sequence ?? collectionExpr;
-        var effectiveElementType = sequenceElementType ?? collectionElementType;
-
-        Expression rawCall;
-
-        switch (operation)
-        {
-            case CollectionOperation.Count:
-                if (!TryCallEnumerable(nameof(Enumerable.Count), effectiveElementType, effectiveSequence, out rawCall))
-                    return false;
-                break;
-
-            case CollectionOperation.Any:
-                if (!TryCallEnumerable(nameof(Enumerable.Any), effectiveElementType, effectiveSequence, out rawCall))
-                    return false;
-                break;
-
-            case CollectionOperation.Sum:
-            case CollectionOperation.Average:
-            case CollectionOperation.Max:
-            case CollectionOperation.Min:
-                if (!TryCallAggregate(operation, effectiveElementType, effectiveSequence, out rawCall))
-                    return false;
-                break;
-
-            case CollectionOperation.First:
-                if (!TryCallEnumerable(nameof(Enumerable.First), effectiveElementType, effectiveSequence, out rawCall))
-                    return false;
-                break;
-
-            case CollectionOperation.FirstOrDefault:
-                if (!TryCallEnumerable(nameof(Enumerable.FirstOrDefault), effectiveElementType, effectiveSequence, out rawCall))
-                    return false;
-                break;
-
-            case CollectionOperation.Last:
-                if (!TryCallEnumerable(nameof(Enumerable.Last), effectiveElementType, effectiveSequence, out rawCall))
-                    return false;
-                break;
-
-            case CollectionOperation.LastOrDefault:
-                if (!TryCallEnumerable(nameof(Enumerable.LastOrDefault), effectiveElementType, effectiveSequence, out rawCall))
-                    return false;
-                break;
-            case CollectionOperation.All:
-                if (!TryBuildAllExpression(effectiveSequence, effectiveElementType, out rawCall))
-                    return false;
-                break;
-            default:
-                return false;
-        }
-
-        var defaultResult = Expression.Default(rawCall.Type);
-        Expression body = rawCall;
-
-        var protectFromEmpty = operation != CollectionOperation.Count &&
-                               operation != CollectionOperation.Any &&
-                               operation != CollectionOperation.All;
-        if (protectFromEmpty)
-        {
-            if (!TryCallEnumerable(nameof(Enumerable.Any), collectionElementType, collectionExpr, out var anyCall))
-                return false;
-
-            body = Expression.Condition(
-                anyCall,
-                body,
-                defaultResult,
-                rawCall.Type);
-        }
-
-        if (CanBeNull(collectionExpr.Type))
-        {
-            var nullCheck = Expression.Equal(
-                collectionExpr,
-                Expression.Constant(null, collectionExpr.Type));
-
-            body = Expression.Condition(
-                nullCheck,
-                defaultResult,
-                body,
-                rawCall.Type);
-        }
-
-        result = body;
-        return true;
-    }
-
-
-    private static bool TryBuildAllExpression(
-    Expression sequence,
-    Type elementType,
-    out Expression call)
-    {
-        call = null!;
-
-        if (elementType != typeof(bool))
-            return false;
-
-        var allMethod = typeof(Enumerable)
-            .GetMethods(BindingFlags.Public | BindingFlags.Static)
-            .FirstOrDefault(m =>
-                m.Name == nameof(Enumerable.All) &&
-                m.IsGenericMethodDefinition &&
-                m.GetParameters().Length == 2);
-
-        if (allMethod is null)
-            return false;
-
-        var genericMethod = allMethod.MakeGenericMethod(elementType);
-
-        var itemParam = Expression.Parameter(elementType, "allItem");
-        var predicateBody = itemParam; // x => x
-        var predicate = Expression.Lambda(predicateBody, itemParam);
-
-        call = Expression.Call(
-            genericMethod,
-            sequence,
-            predicate);
-
-        return true;
-    }
-
-    private static bool TryCallAggregate(
-        CollectionOperation operation,
-        Type elementType,
-        Expression sequence,
-        out Expression call)
-    {
-        call = null!;
-
-        var methodName = operation switch
-        {
-            CollectionOperation.Sum => nameof(Enumerable.Sum),
-            CollectionOperation.Average => nameof(Enumerable.Average),
-            CollectionOperation.Max => nameof(Enumerable.Max),
-            CollectionOperation.Min => nameof(Enumerable.Min),
-            _ => throw new MappingException($"Unsupported aggregate operation '{operation}'.")
-        };
-
-        return TryCallEnumerable(methodName, elementType, sequence, out call);
-    }
-
-    private static bool TryCallEnumerable(string methodName, Type elementType, Expression source, out Expression call)
-    {
-        call = null!;
-
-        try
-        {
-            var method = FindEnumerableMethod(methodName, elementType, source);
-            call = Expression.Call(method, source);
-            return true;
-        }
-        catch (MappingException)
-        {
-            return false;
-        }
-        catch (ArgumentException)
-        {
-            return false;
-        }
-        catch (InvalidOperationException)
-        {
-            return false;
-        }
-    }
-
-    private static MethodInfo FindEnumerableMethod(string methodName, Type elementType, Expression source)
-    {
-        var methods = typeof(Enumerable)
-            .GetMethods(BindingFlags.Public | BindingFlags.Static)
-            .Where(m => m.Name == methodName && m.GetParameters().Length == 1)
-            .ToArray();
-
-        foreach (var method in methods)
-        {
-            if (method.IsGenericMethodDefinition && method.GetGenericArguments().Length == 1)
-            {
-                MethodInfo generic;
-
-                try
-                {
-                    generic = method.MakeGenericMethod(elementType);
-                }
-                catch (ArgumentException)
-                {
-                    continue;
-                }
-
-                if (generic.GetParameters()[0].ParameterType.IsAssignableFrom(source.Type))
-                    return generic;
-            }
-            else if (!method.IsGenericMethod)
-            {
-                if (method.GetParameters()[0].ParameterType.IsAssignableFrom(source.Type))
-                    return method;
-            }
-        }
-
-        throw new MappingException(
-            $"Cannot find suitable Enumerable.{methodName} overload for element type '{elementType.FullName}'.");
-    }
-
-    private static bool TryGetDirectSourceMember(
-        Type sourceType,
-        string memberName,
-        bool exactOnly,
-        out MemberInfo member)
-    {
-        member = null!;
-
-        var comparison = exactOnly
-            ? StringComparison.Ordinal
-            : StringComparison.OrdinalIgnoreCase;
-
-        var candidates = GetSourceMembers(sourceType)
-            .Where(m => string.Equals(m.Name, memberName, comparison))
-            .ToArray();
-
-        if (candidates.Length == 1)
-        {
-            member = candidates[0];
-            return true;
-        }
-
-        if (candidates.Length > 1)
-        {
-            var preferred = TryGetPreferredProperty(candidates);
-            if (preferred is not null)
-            {
-                member = preferred;
-                return true;
-            }
-
-            throw new MappingException(
-                $"Ambiguous source member match for member '{memberName}' on source type '{sourceType.FullName}'.");
-        }
-
-        return false;
+            Expression.Equal(source, Expression.Constant(null, source.Type)),
+            Expression.Default(targetType),
+            target.Type == targetType ? target : Expression.Convert(target, targetType),
+            targetType);
     }
 
     private static bool CanBeNull(Type type)
@@ -1407,35 +808,24 @@ static class MappingBuilder
             .GetFields(BindingFlags.Public | BindingFlags.Instance)
             .Cast<MemberInfo>();
 
-        return properties.Concat(fields)
-            .GroupBy(m => m.Name, StringComparer.Ordinal)
-            .Select(g => g.OfType<PropertyInfo>().FirstOrDefault() ?? g.First());
+        return properties.Concat(fields);
     }
 
-    private static PropertyInfo? TryGetPreferredProperty(MemberInfo[] candidates)
-    {
-        var properties = candidates.OfType<PropertyInfo>().ToArray();
-        return properties.Length == 1 ? properties[0] : null;
-    }
-
-    private static Expression EnsureType(Expression expression, Type type)
-    {
-        if (expression.Type == type)
-            return expression;
-
-        return Expression.Convert(expression, type);
-    }
 
     private static UnaryExpression? TryConvert(Expression expr, Type targetType)
     {
+        var sourceType = expr.Type;
+        var key = (targetType, sourceType);
+        if (tryConvertCache.TryGetValue(key, out var canCovert) && !canCovert) return null;
+
         try
         {
             return Expression.Convert(expr, targetType);
-
         }
         catch (InvalidOperationException)
         {
-            return null;            
+            tryConvertCache[key] = false;
+            return null;
         }
     }
 
@@ -1505,8 +895,39 @@ static class MappingBuilder
         _ => throw new InvalidOperationException("Unsupported member type")
     };
 
-    private static IEnumerable<(string Name, CollectionOperation Operation)> GetCollectionOperations()
+    private static NullabilityInfo GetMemberNullability(MemberInfo member) => member switch
     {
-        return CollectionOperations.OrderByDescending(o => o.Name.Length);
+        PropertyInfo p => SafeNullability(p),
+        FieldInfo f => SafeNullability(f),
+        _ => throw new InvalidOperationException("Unsupported member type")
+    };
+
+
+
+    private static readonly NullabilityInfoContext NullabilityContext = new();
+    private static readonly Lock NullabilityLock = new();
+    private static readonly ConcurrentDictionary<(Type Target, Type Source), bool> tryConvertCache = [];
+
+    private static NullabilityInfo SafeNullability(PropertyInfo info)
+    {
+        lock (NullabilityLock)
+        {
+            return NullabilityContext.Create(info);
+        }
     }
+    private static NullabilityInfo SafeNullability(FieldInfo info)
+    {
+        lock (NullabilityLock)
+        {
+            return NullabilityContext.Create(info);
+        }
+    }
+    private static NullabilityInfo SafeNullability(ParameterInfo info)
+    {
+        lock (NullabilityLock)
+        {
+            return NullabilityContext.Create(info);
+        }
+    }
+
 }
