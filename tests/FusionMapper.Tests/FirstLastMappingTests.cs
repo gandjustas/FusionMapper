@@ -1,6 +1,4 @@
-﻿using FusionMapper;
-
-namespace FusionMapper.Tests;
+﻿namespace FusionMapper.Tests;
 
 public class FirstLastMappingTests
 {

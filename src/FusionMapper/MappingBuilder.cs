@@ -443,22 +443,25 @@ static class MappingBuilder
         NullabilityState targetNullability,
         MappingPath path)
     {
-        if (targetType.IsPointer || targetType.IsFunctionPointer) return null;
+        if (targetType.IsPointer || targetType.IsFunctionPointer)
+            return null;
 
         var sourceType = sourceExpr.Type;
 
         if (targetType.IsAssignableFrom(sourceType))
         {
-            if (targetType != sourceType && targetType.IsValueType && Nullable.GetUnderlyingType(targetType) != null)
+            if (targetType != sourceType &&
+                targetType.IsValueType &&
+                Nullable.GetUnderlyingType(targetType) is not null)
+            {
                 return Expression.Convert(sourceExpr, targetType);
+            }
+
             return sourceExpr;
         }
-        if (sourceType.IsValueType
-            && targetType.IsValueType
-            && TryConvert(sourceExpr, targetType) is { } e)
-            return e;
 
-        if (targetType.IsPrimitive) return null;
+        var sourceUnderlyingType = Nullable.GetUnderlyingType(sourceType);
+        var targetUnderlyingType = Nullable.GetUnderlyingType(targetType);
 
         var sourceCanBeNull =
             CanBeNull(sourceType) &&
@@ -468,24 +471,48 @@ static class MappingBuilder
             CanBeNull(targetType) &&
             targetNullability != NullabilityState.NotNull;
 
-        var nonNullBody = BuildNonNullMappingBody(sourceExpr, NullabilityState.NotNull, targetType, path);
-        if (sourceCanBeNull && nonNullBody is not null)
-        {
-            Expression nullBranch;
+        var nonNullSource = sourceUnderlyingType is null
+            ? sourceExpr
+            : Expression.Property(sourceExpr, sourceType.GetProperty("Value")!);
 
-            if (targetAcceptsNull || Nullable.GetUnderlyingType(targetType) is not null)
+        var nonNullTarget = targetUnderlyingType ?? targetType;
+
+        var nonNullBody = BuildNonNullMappingBody(
+            nonNullSource,
+            NullabilityState.NotNull,
+            nonNullTarget,
+            path);
+
+        if (nonNullBody is null)
+            return null;
+
+        if (nonNullBody.Type != targetType)
+        {
+            if (targetType.IsAssignableFrom(nonNullBody.Type))
             {
-                nullBranch = Expression.Default(targetType);
+                nonNullBody = Expression.Convert(nonNullBody, targetType);
+            }
+            else if (targetUnderlyingType is not null &&
+                     targetUnderlyingType.IsAssignableFrom(nonNullBody.Type))
+            {
+                nonNullBody = Expression.Convert(nonNullBody, targetType);
             }
             else
             {
-                nullBranch = Expression.Throw(
+                return null;
+            }
+        }
+
+        if (sourceCanBeNull)
+        {
+            Expression nullBranch = targetAcceptsNull || targetUnderlyingType is not null
+                ? Expression.Default(targetType)
+                : Expression.Throw(
                     Expression.New(
                         typeof(MappingException).GetConstructor([typeof(string)])!,
                         Expression.Constant(
-                            $"Cannot map null source to non-nullable value type '{targetType.FullName}'.")),
+                            $"Cannot map null source to non-nullable target type '{targetType.FullName}'.")),
                     targetType);
-            }
 
             return Expression.Condition(
                 Expression.Equal(sourceExpr, Expression.Constant(null, sourceType)),
@@ -497,6 +524,7 @@ static class MappingBuilder
         return nonNullBody;
     }
 
+
     private static Expression? BuildNonNullMappingBody(
         Expression sourceExpr,
         NullabilityState sourceNullability,
@@ -504,8 +532,9 @@ static class MappingBuilder
         MappingPath path)
     {
         var sourceType = sourceExpr.Type;
-        if (IsCollectionType(targetType, out var targetElementType)
-            && IsCollectionType(sourceType, out var sourceElementType))
+
+        if (IsCollectionType(targetType, out var targetElementType) &&
+            IsCollectionType(sourceType, out var sourceElementType))
         {
             return BuildCollectionMapping(
                 sourceExpr,
@@ -515,9 +544,32 @@ static class MappingBuilder
                 path);
         }
 
+        if (targetType.IsAssignableFrom(sourceType))
+        {
+            return targetType == sourceType
+                ? sourceExpr
+                : Expression.Convert(sourceExpr, targetType);
+        }
+
+        // enum -> string
+        if (sourceType.IsEnum && targetType == typeof(string))
+        {
+            return Expression.Call(
+                Expression.Convert(sourceExpr, typeof(object)),
+                ObjectToStringMethod);
+        }
+
+        // string -> enum
+        if (sourceType == typeof(string) && targetType.IsEnum)
+        {
+            return BuildStringToEnum(sourceExpr, targetType);
+        }
+
         if (TryConvert(sourceExpr, targetType) is { } e)
             return e;
 
+        if (targetType.IsPrimitive)
+            return null;
 
         return BuildObjectMapping(sourceExpr, sourceNullability, targetType, path);
     }
@@ -941,6 +993,16 @@ static class MappingBuilder
         }
     }
 
+    private static UnaryExpression BuildStringToEnum(Expression source, Type enumType)
+    {
+        var parsed = Expression.Call(
+            EnumParseMethod,
+            Expression.Constant(enumType, typeof(Type)),
+            source);
+
+        return Expression.Convert(parsed, enumType);
+    }
+
     private static bool IsCollectionType(Type type, [NotNullWhen(true)] out Type? elementType)
     {
         elementType = null;
@@ -1003,6 +1065,11 @@ static class MappingBuilder
         _ => throw new InvalidOperationException("Unsupported member type")
     };
 
+    private static readonly MethodInfo ObjectToStringMethod =
+        typeof(object).GetMethod(nameof(object.ToString), Type.EmptyTypes)!;
+
+    private static readonly MethodInfo EnumParseMethod =
+        typeof(Enum).GetMethod(nameof(Enum.Parse), [typeof(Type), typeof(string)])!;
 
 
     private static readonly NullabilityInfoContext NullabilityContext = new();

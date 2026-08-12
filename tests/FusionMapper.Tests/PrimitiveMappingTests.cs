@@ -124,7 +124,7 @@ public class PrimitiveMappingTests
     {
         int? source = null;
         await Assert.That(() => source.Map().To<int>())
-            .Throws<InvalidOperationException>();
+            .Throws<MappingException>();
     }
 
     [Test]
