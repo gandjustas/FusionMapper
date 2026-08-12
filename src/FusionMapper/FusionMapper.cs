@@ -53,10 +53,10 @@ public static class FusionMapper
     internal static IQueryable<TTarget> Project<TSource, TTarget>(IQueryable<TSource> source)
     {
         ArgumentNullException.ThrowIfNull(source);
-        var rewrittenSource = Rewrite<TSource, TSource>(source);
+        var rewrittenSource = Rewrite(source);
         return rewrittenSource.Select(GetCreationLambda<TSource, TTarget>());
     }
-    internal static IQueryable<TTarget> Rewrite<TSource, TTarget>(IQueryable<TTarget> query)
+    internal static IQueryable<TTarget> Rewrite<TTarget>(IQueryable<TTarget> query)
     {
         ArgumentNullException.ThrowIfNull(query);
 

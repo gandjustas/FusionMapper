@@ -12,7 +12,6 @@ public class ProjectionBenchmark
 {
     private IQueryable<SimpleSource> _sourceQuery = null!;
     private IMapper _autoMapper = null!;
-    private MapperlyMapper _mapperly = null!;
 
     [GlobalSetup]
     public void Setup()
@@ -26,7 +25,6 @@ public class ProjectionBenchmark
 
         _autoMapper = AutoMapperConfig.CreateMapper();
         MapsterConfig.Configure();
-        _mapperly = new MapperlyMapper();
     }
 
     // Для проекции ручное маппинг не имеет смысла, поэтому используем Select вручную как Baseline

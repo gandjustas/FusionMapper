@@ -1085,26 +1085,25 @@ static class MappingBuilder
 
 
     private static readonly NullabilityInfoContext NullabilityContext = new();
-    private static readonly Lock NullabilityLock = new();
     private static readonly ConcurrentDictionary<(Type Target, Type Source), bool> TryConvertCache = [];
 
     private static NullabilityInfo SafeNullability(PropertyInfo info)
     {
-        lock (NullabilityLock)
+        lock (NullabilityContext)
         {
             return NullabilityContext.Create(info);
         }
     }
     private static NullabilityInfo SafeNullability(FieldInfo info)
     {
-        lock (NullabilityLock)
+        lock (NullabilityContext)
         {
             return NullabilityContext.Create(info);
         }
     }
     private static NullabilityInfo SafeNullability(ParameterInfo info)
     {
-        lock (NullabilityLock)
+        lock (NullabilityContext)
         {
             return NullabilityContext.Create(info);
         }
