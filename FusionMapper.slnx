@@ -1,4 +1,7 @@
 <Solution>
+  <Folder Name="/benchmarks/">
+    <Project Path="benchmarks/FusionMapper.Benchmarks/FusionMapper.Benchmarks.csproj" />
+  </Folder>
   <Folder Name="/src/">
     <Project Path="src/FusionMapper/FusionMapper.csproj" />
   </Folder>
