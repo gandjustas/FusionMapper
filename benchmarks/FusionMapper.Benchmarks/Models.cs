@@ -1,6 +1,4 @@
-﻿using AutoMapper;
-
-// --- Модели для бенчмарка ---
+﻿// --- Модели для бенчмарка ---
 public class SimpleSource
 {
     public int Id { get; set; }
@@ -15,18 +13,38 @@ public class SimpleDestination
     public decimal Price { get; set; }
 }
 
-// --- Настройка AutoMapper ---
-public class AutoMapperProfile : Profile
+public class NestedSource
 {
-    public AutoMapperProfile()
-    {
-        CreateMap<SimpleSource, SimpleDestination>();
-    }
+    public string Name { get; set; } = string.Empty;
+    public Level1 Level1 { get; set; } = new();
 }
 
-// --- Настройка Mapperly ---
-[Riok.Mapperly.Abstractions.Mapper]
-public partial class MapperlyMapper
+public class Level1
 {
-    public partial SimpleDestination Map(SimpleSource source);
+    public string Title { get; set; } = string.Empty;
+    public Level2 Level2 { get; set; } = new();
+}
+
+public class Level2
+{
+    public string Description { get; set; } = string.Empty;
+    public int Value { get; set; }
+}
+
+public class NestedDestination
+{
+    public string Name { get; set; } = string.Empty;
+    public string Level1Title { get; set; } = string.Empty;
+    public string Level1Level2Description { get; set; } = string.Empty;
+    public int Level1Level2Value { get; set; }
+}
+
+public class CollectionSource
+{
+    public List<SimpleSource> Items { get; set; } = [];
+}
+
+public class CollectionDestination
+{
+    public List<SimpleDestination> Items { get; set; } = [];
 }
