@@ -92,4 +92,49 @@ public class CollectionMappingTests
         await Assert.That(result.First().Name).IsEqualTo("A");
         await Assert.That(result.Last().Name).IsEqualTo("B");
     }
+
+    [Test]
+    public async Task ItemsCount_ShouldMap_CollectionCount()
+    {
+        var source = new SourceWithItems
+        {
+            Items = [new ItemSource { Price = 10 }, new ItemSource { Price = 20 }]
+        };
+
+        var target = source.Map().To<TargetWithItemsCount>();
+
+        await Assert.That(target.ItemsCount).IsEqualTo(2);
+    }
+
+    [Test]
+    public async Task ItemsNameFirstOrDefault_ShouldMap_SelectedElementMember()
+    {
+        var source = new SourceWithItems
+        {
+            Items =
+            [
+                new ItemSource { Name = "A" },
+            new ItemSource { Name = "B" }
+            ]
+        };
+
+        var target = source.Map().To<TargetWithItemsNameFirstOrDefault>();
+
+        await Assert.That(target.ItemsNameFirstOrDefault).IsEqualTo("A");
+    }
+
+    private sealed class SourceWithItems
+    {
+        public IEnumerable<ItemSource> Items { get; set; }
+    }
+
+    private sealed class TargetWithItemsCount
+    {
+        public int ItemsCount { get; set; }
+    }
+
+    private sealed class TargetWithItemsNameFirstOrDefault
+    {
+        public string? ItemsNameFirstOrDefault { get; set; }
+    }
 }

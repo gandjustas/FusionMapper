@@ -1,6 +1,5 @@
 namespace FusionMapper.Tests;
 
-[Skip("Skipping all tests in this class")]
 public class ExpressionRewriteTests
 {
     [Test]
@@ -84,7 +83,7 @@ public class ExpressionRewriteTests
             ExpressionHelper.ContainsMethodName(query.Expression, "Map")
         ).IsTrue();
 
-        var rewritten = source
+        var rewritten = query
             .Project()
             .To<string>();
 
@@ -177,17 +176,19 @@ public class ExpressionRewriteTests
             new SimpleSource { Name = "B", Value = 2 }
         }.AsQueryable();
 
-        var query = source
-            .Where(x => x.Value == 1)
-            .Select(x => x.Name);
+        var query = source.Select(x => x.Name);
 
-        var rewritten = source
+        var rewritten = query
             .Project()
             .To<string>();
 
+        await Assert.That(
+            ExpressionHelper.ContainsMethodName(rewritten.Expression, "Map")
+        ).IsFalse();
+
         var result = rewritten.ToList();
 
-        await Assert.That(result.Count).IsEqualTo(1);
+        await Assert.That(result.Count).IsEqualTo(2);
         await Assert.That(result[0]).IsEqualTo("A");
     }
 

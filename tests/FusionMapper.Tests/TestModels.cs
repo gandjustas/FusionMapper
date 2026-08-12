@@ -272,6 +272,7 @@ public class ItemSource
 {
     public string Name { get; set; } = string.Empty;
     public decimal Value { get; set; }
+    public int Price { get; internal set; }
 }
 
 public class ItemTarget

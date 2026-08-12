@@ -98,4 +98,5 @@ public class ConstructorAndRequiredTests
         await Assert.That(result.Name).IsEqualTo("Init");
         await Assert.That(result.Value).IsEqualTo(3);
     }
+
 }

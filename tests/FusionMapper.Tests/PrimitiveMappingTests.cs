@@ -155,10 +155,25 @@ public class PrimitiveMappingTests
         await Assert.That(source.Map().To<int?>()).IsNull();
     }
 
+    [Test]
+    public async Task NullableIntToInt_ShouldMapValue_WhenSourceValueIsNotNull()
+    {
+        var source = new NullableSource { Value = 42 };
+
+        var target = source.Map().To<NonNullableTarget>();
+
+        await Assert.That(target.Value).IsEqualTo(42);
+    }
+
     public enum Color
     {
         Red = 0,
         Green = 1,
         Blue = 2
+    }
+
+    private class NonNullableTarget
+    {
+        public int Value { get; set; }
     }
 }

@@ -1,5 +1,7 @@
 using System.Collections.Concurrent;
 using System.Linq.Expressions;
+using System.Reflection;
+using System.Runtime.ExceptionServices;
 
 namespace FusionMapper;
 
@@ -14,7 +16,7 @@ public static class FusionMapper
 
     static readonly ConcurrentDictionary<(Type Source, Type Target), Delegate> MapDelegates = new();
     static readonly ConcurrentDictionary<(Type Source, Type Target), Delegate> MapToExistingDelegates = new();
-    static readonly ConcurrentDictionary<(Type Source, Type Target), Expression> MapLambdaExpressions = new();
+    static readonly ConcurrentDictionary<(Type Source, Type Target), LambdaExpression> MapLambdaExpressions = new();
 
     #pragma warning disable S2955
 
@@ -43,8 +45,8 @@ public static class FusionMapper
 #pragma warning restore S2955
         ArgumentNullException.ThrowIfNull(target);
 
-        var del = MapToExistingDelegates.GetOrAdd((typeof(TSource), typeof(TTarget)), _ =>
-            MappingBuilder.BuildAssignmentExpression<TSource, TTarget>().Compile());
+        var del = MapToExistingDelegates.GetOrAdd((typeof(TSource), typeof(TTarget)), 
+            key => MappingBuilder.BuildAssignmentExpression(key.Source, key.Target).Compile());
         var action = (Action<TSource, TTarget>)del;
         action(source, target);
         return target;
@@ -52,14 +54,33 @@ public static class FusionMapper
 
     internal static IQueryable<TTarget> Project<TSource, TTarget>(IQueryable<TSource> source)
     {
-        // TODO: Add rewrite expression to inline calls .Map().To<T> and Project().To<T> 
-        return source.Select(GetCreationLambda<TSource, TTarget>());
+        ArgumentNullException.ThrowIfNull(source);
+        var rewrittenSource = Rewrite<TSource, TSource>(source);
+        return rewrittenSource.Select(GetCreationLambda<TSource, TTarget>());
+    }
+    internal static IQueryable<TTarget> Rewrite<TSource, TTarget>(IQueryable<TTarget> query)
+    {
+        ArgumentNullException.ThrowIfNull(query);
+
+        if (new ExpressionRewriter().Visit(query.Expression) is not { } newExpression)
+        {
+            return query;
+        }
+
+        if (!typeof(IQueryable<TTarget>).IsAssignableFrom(newExpression.Type))
+        {
+            throw new MappingException(
+                $"Expression rewriting produced an expression of type '{newExpression.Type.FullName}' " +
+                $"which is not assignable to '{typeof(IQueryable<TTarget>).FullName}'.");
+        }
+
+        return query.Provider.CreateQuery<TTarget>(newExpression);
     }
 
     static Expression<Func<TSource, TTarget>> GetCreationLambda<TSource, TTarget>()
     {
         return (Expression<Func<TSource, TTarget>>)MapLambdaExpressions.GetOrAdd((typeof(TSource), typeof(TTarget)),
-            _ => MappingBuilder.BuildCreationLambda<TSource, TTarget>());
+            key => MappingBuilder.BuildCreationLambda(key.Source, key.Target));
     }
 
 

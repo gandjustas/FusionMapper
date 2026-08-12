@@ -71,4 +71,21 @@ public class MapIntoExistingObjectTests
         await Assert.That(target.Items[0].Name).IsEqualTo("A");
         await Assert.That(target.Items[1].Name).IsEqualTo("B");
     }
+
+    [Test]
+    public async Task InitOnlyMember_ShouldNotBeUpdated_WhenMappingToExistingTarget()
+    {
+        var source = new SimpleSource { Name = "New" };
+        var target = new InitOnlyTarget { Name = "Old" };
+
+        source.Map().To(target);
+
+        await Assert.That(target.Name).IsEqualTo("Old");
+    }
+
+    private sealed class InitOnlyTarget
+    {
+        public string Name { get; init; }
+        public int Value { get; set; }
+    }
 }
