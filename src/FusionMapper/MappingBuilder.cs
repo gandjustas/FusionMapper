@@ -45,46 +45,66 @@ static class MappingBuilder
 
     public static LambdaExpression BuildAssignmentExpression(Type sourceType, Type targetType)
     {
-
         var sourceParam = Expression.Parameter(sourceType, "source");
         var targetParam = Expression.Parameter(targetType, "target");
 
         MappingPath path = new();
 
+        // Корневая пара нужна, чтобы recursion detection видел полный путь.
+        using var rootGuard = path.Push(targetType, sourceType);
 
         var writableProperties = targetType
             .GetProperties(BindingFlags.Public | BindingFlags.Instance)
-            .Where(p => p.CanWrite && !IsInitOnly(p))
+            .Where(p => p.GetIndexParameters().Length == 0)
+            .Where(p => p.SetMethod is { IsPublic: true })
+            .Where(p => !IsInitOnly(p))
             .Cast<MemberInfo>();
-
 
         var writableFields = targetType
             .GetFields(BindingFlags.Public | BindingFlags.Instance)
             .Where(f => !f.IsInitOnly && !f.IsLiteral)
             .Cast<MemberInfo>();
 
-
         var assignExpressions = writableProperties
             .Concat(writableFields)
             .Select(member =>
             {
-                var targetType = GetMemberType(member);
-                foreach (var (accessExpr, nullability)
+                var memberType = GetMemberType(member);
+                var targetNullability = GetMemberNullability(member).WriteState;
+
+                foreach (var (accessExpr, sourceNullability)
                     in GetSourceMemberAccess(sourceParam, NullabilityState.NotNull, member.Name))
                 {
-                    using var guard = path.Push(GetMemberType(member), accessExpr.Type);
-                    if (BuildMappingBody(accessExpr, nullability,
-                        targetType, GetMemberNullability(member).WriteState,
-                        path) is { } mappedExpr)
+                    using var guard = path.Push(memberType, accessExpr.Type);
+
+                    if (BuildMappingBody(
+                            accessExpr,
+                            sourceNullability,
+                            memberType,
+                            targetNullability,
+                            path) is not { } mappedExpr)
                     {
-                        return (Expression)Expression.Assign(Expression.MakeMemberAccess(targetParam, member), mappedExpr);
+                        continue;
                     }
+
+                    // BuildMappingBody может вернуть expression с типом, который assignable target'у,
+                    // но не совпадает с ним. Для стабильных expression tree лучше приводить явно.
+                    if (mappedExpr.Type != memberType)
+                    {
+                        if (!memberType.IsAssignableFrom(mappedExpr.Type))
+                            continue;
+
+                        mappedExpr = Expression.Convert(mappedExpr, memberType);
+                    }
+
+                    return (Expression)Expression.Assign(
+                        Expression.MakeMemberAccess(targetParam, member),
+                        mappedExpr);
                 }
+
                 return null;
             })
             .Where(x => x is not null);
-
-
 
         var readOnlyProperties = targetType
             .GetProperties(BindingFlags.Public | BindingFlags.Instance)
@@ -105,34 +125,60 @@ static class MappingBuilder
             {
                 var targetMemberType = GetMemberType(member);
 
-                if (!IsCollectionType(targetMemberType, out _)) return null;
+                if (!IsCollectionType(targetMemberType, out _))
+                    return null;
 
-                foreach (var (accessExpr, _)
+                foreach (var (accessExpr, nullability)
                     in GetSourceMemberAccess(sourceParam, NullabilityState.NotNull, member.Name))
                 {
-                    // TODO: handle nullable
-                    return BuildReadOnlyCollectionMutation(
+                    // Если кандидат не является коллекцией, пробуем следующего кандидата.
+                    if (!IsCollectionType(accessExpr.Type, out _))
+                        continue;
+
+                    using var guard = path.Push(targetMemberType, accessExpr.Type);
+
+                    if (BuildReadOnlyCollectionMutation(
                             targetParam,
                             member,
                             targetMemberType,
                             accessExpr,
-                            path);
+                            nullability,
+                            path) is { } mutation)
+                    {
+                        return (Expression)mutation;
+                    }
                 }
+
                 return null;
             })
             .Where(x => x is not null);
 
-        var body = Expression.Block(typeof(void), assignExpressions.Concat(fillCollectionExpressions)!);
-        if (body.Expressions.Count == 0) throw new MappingException($"No properties were mapped");
+        var bodyExpressions = assignExpressions
+            .Concat(fillCollectionExpressions)
+            .OfType<Expression>()
+            .ToArray();
 
-        return Expression.Lambda(body, sourceParam, targetParam);
+        if (bodyExpressions.Length == 0)
+        {
+            throw new MappingException(
+                $"No members were mapped from '{sourceType.FullName}' to '{targetType.FullName}'.");
+        }
+
+        var body = Expression.Block(typeof(void), bodyExpressions);
+
+        // Явно создаём Action<TSource, TTarget>, чтобы избежать проблем с кастом LambdaExpression.
+        var delegateType = typeof(Action<,>).MakeGenericType(sourceType, targetType);
+
+        return Expression.Lambda(delegateType, body, sourceParam, targetParam);
     }
+
 
     private static BlockExpression? BuildReadOnlyCollectionMutation(
         ParameterExpression targetParam,
         MemberInfo member,
         Type targetCollectionType,
         Expression sourceAccess,
+        NullabilityState sourceNullability,
         MappingPath path)
     {
         if (!IsCollectionType(targetCollectionType, out var targetElementType) ||
@@ -155,9 +201,11 @@ static class MappingBuilder
                 $"Target member type: '{targetCollectionType.FullName}'.");
         }
 
+
         var clearMethod = FindCollectionClearMethod(targetCollectionType);
-        var addRangeMethod = FindCollectionAddRangeMethod(targetCollectionType, targetElementType);
         var addMethod = FindCollectionAddMethod(targetCollectionType, targetElementType);
+        var addRangeMethod = FindCollectionAddRangeMethod(targetCollectionType, targetElementType);
+
 
         if (clearMethod is null || (addRangeMethod is null && addMethod is null))
         {
@@ -167,18 +215,18 @@ static class MappingBuilder
                 "The collection must expose a public Clear method and either AddRange or Add.");
         }
 
+        var mappedEnumerableType = typeof(IEnumerable<>).MakeGenericType(targetElementType);
+
         var memberAccess = Expression.MakeMemberAccess(targetParam, member);
 
         var existingVar = Expression.Variable(targetCollectionType, $"{member.Name}_existing");
         var sourceVar = Expression.Variable(sourceAccess.Type, $"{member.Name}_source");
+        var mappedListVar = Expression.Variable(mappedEnumerableType, $"{member.Name}_mapped");
 
-        var listType = typeof(List<>).MakeGenericType(targetElementType);
-        var mappedListVar = Expression.Variable(listType, $"{member.Name}_mapped");
-        var iVar = Expression.Variable(typeof(int), $"{member.Name}_index");
-
-        List<Expression> body = [];
-
-        body.Add(Expression.Assign(existingVar, memberAccess));
+        List<Expression> body =
+        [
+            Expression.Assign(existingVar, memberAccess)
+        ];
 
         if (CanBeNull(targetCollectionType))
         {
@@ -188,15 +236,45 @@ static class MappingBuilder
                     Expression.New(
                         typeof(MappingException).GetConstructor([typeof(string)])!,
                         Expression.Constant(
-                            $"Read-only collection member '{member.Name}' is null and cannot be mutated.")),
+                            $"Read-only collection member '{member.Name}' is null and cannot be mutated. " +
+                            $"Target member type: '{targetCollectionType.FullName}'.")),
                     typeof(void))));
         }
 
         body.Add(Expression.Assign(sourceVar, sourceAccess));
 
         var itemParam = Expression.Parameter(sourceElementType, "item");
-        var mappedItem = BuildMappingBody(itemParam, sourceNullability: NullabilityState.Unknown, targetType: targetElementType, targetNullability: NullabilityState.Unknown, path: path);
-        var lambda = Expression.Lambda(mappedItem, itemParam);
+
+        Expression mappedItem;
+
+        // Пушим пару элементов, чтобы корректно детектить рекурсию на уровне element mapping.
+        using (path.Push(targetElementType, sourceElementType))
+        {
+            if (BuildMappingBody(
+                    itemParam,
+                    sourceNullability: NullabilityState.NotNull,
+                    targetType: targetElementType,
+                    targetNullability: NullabilityState.NotNull,
+                    path: path) is not { } itemBody)
+            {
+                return null;
+            }
+
+            mappedItem = itemBody;
+        }
+
+        // Select<TSource, TResult> требует Func<TSource, TResult>.
+        // Если body имеет assignable, но другой тип, приводим к targetElementType.
+        if (mappedItem.Type != targetElementType)
+        {
+            if (!targetElementType.IsAssignableFrom(mappedItem.Type))
+                return null;
+
+            mappedItem = Expression.Convert(mappedItem, targetElementType);
+        }
+
+        var lambdaType = typeof(Func<,>).MakeGenericType(sourceElementType, targetElementType);
+        var lambda = Expression.Lambda(lambdaType, mappedItem, itemParam);
 
         var selectCall = Expression.Call(
             typeof(Enumerable),
@@ -205,25 +283,25 @@ static class MappingBuilder
             sourceVar,
             lambda);
 
-        var toListCall = Expression.Call(
-            typeof(Enumerable),
-            nameof(Enumerable.ToList),
-            [targetElementType],
-            selectCall);
+
 
         Expression mappedListValue;
 
-        if (CanBeNull(sourceVar.Type))
+        if (CanBeNull(sourceVar.Type) &&
+            sourceNullability != NullabilityState.NotNull)
         {
             mappedListValue = Expression.Condition(
                 Expression.Equal(sourceVar, Expression.Constant(null, sourceVar.Type)),
-                Expression.New(listType.GetConstructor(Type.EmptyTypes)!),
-                toListCall,
-                listType);
+                Expression.Call(
+                typeof(Enumerable),
+                nameof(Enumerable.Empty),
+                [targetElementType]),
+                selectCall,
+                mappedEnumerableType);
         }
         else
         {
-            mappedListValue = toListCall;
+            mappedListValue = selectCall;
         }
 
         body.Add(Expression.Assign(mappedListVar, mappedListValue));
@@ -232,37 +310,68 @@ static class MappingBuilder
         if (addRangeMethod is not null)
         {
             body.Add(Expression.Call(existingVar, addRangeMethod, mappedListVar));
+            return Expression.Block(
+                typeof(void),
+                [existingVar, sourceVar, mappedListVar],
+                body);
         }
         else
         {
-            body.Add(Expression.Assign(iVar, Expression.Constant(0)));
+            // 1. Resolve types and methods
+            Type enumeratorType = typeof(IEnumerator<>).MakeGenericType(targetElementType);
+            var getEnumeratorMethod = mappedEnumerableType.GetMethod("GetEnumerator")
+                ?? typeof(IEnumerable<>).MakeGenericType(targetElementType).GetMethod("GetEnumerator");
+            var moveNextMethod = typeof(System.Collections.IEnumerator).GetMethod("MoveNext");
+            var currentProperty = enumeratorType.GetProperty("Current");
+            var disposeMethod = typeof(IDisposable).GetMethod("Dispose");
 
-            var breakLabel = Expression.Label("break");
 
-            var addCall = Expression.Call(
-                existingVar,
-                addMethod!,
-                Expression.Property(mappedListVar, "Item", iVar));
+            // 2. Define local variables for the block
+            var enumeratorVar = Expression.Variable(enumeratorType, "enumerator");
+            var itemVar = Expression.Variable(targetElementType, "item");
 
-            var increment = Expression.Assign(
-                iVar,
-                Expression.Add(iVar, Expression.Constant(1)));
+            // 3. Define the break label for the loop
+            LabelTarget breakLabel = Expression.Label("LoopBreak");
 
-            var loopBody = Expression.IfThenElse(
-                Expression.LessThan(
-                    iVar,
-                    Expression.Property(mappedListVar, "Count")),
-                Expression.Block(typeof(void), addCall, increment),
-                Expression.Break(breakLabel));
+            // 4. Build loop mechanics
+            var assignEnumerator = Expression.Assign(
+                enumeratorVar,
+                Expression.Call(selectCall, getEnumeratorMethod!)
+            );
 
-            var loop = Expression.Loop(loopBody, breakLabel);
-            body.Add(loop);
+            var moveNextCall = Expression.Call(enumeratorVar, moveNextMethod!);
+            var assignCurrent = Expression.Assign(
+                itemVar,
+                Expression.Property(enumeratorVar, currentProperty!)
+            );
+
+            // Invokes your custom loop body passing the loop variable
+            var loopBodyBlock = Expression.Block(
+                [itemVar],
+                assignCurrent,
+                Expression.Call(existingVar, addMethod!, itemVar)
+            );
+
+            // Assemble the structural Loop
+            var loop = Expression.Loop(
+                Expression.IfThenElse(
+                    Expression.Equal(moveNextCall, Expression.Constant(true)),
+                    loopBodyBlock,
+                    Expression.Break(breakLabel)
+                ),
+                breakLabel
+            );
+
+            // 5. Wrap inside TryFinally for IDisposable cleanup
+            var tryFinally = Expression.TryFinally(
+                loop,
+                Expression.Call(enumeratorVar, disposeMethod!)
+            );
+
+            // 6. Return standard block enclosing the enumerator variable scope
+            return Expression.Block([enumeratorVar], assignEnumerator, tryFinally);
         }
 
-        return Expression.Block(
-            typeof(void),
-            [existingVar, sourceVar, mappedListVar, iVar],
-            body);
 
     }
 
