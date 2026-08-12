@@ -75,12 +75,12 @@ public static class FusionMapper
         return query.Provider.CreateQuery<TTarget>(newExpression);
     }
 
-    static Expression<Func<TSource, TTarget>> GetCreationLambda<TSource, TTarget>()
-    {
-        return (Expression<Func<TSource, TTarget>>)MapLambdaExpressions.GetOrAdd((typeof(TSource), typeof(TTarget)),
-            key => MappingBuilder.BuildCreationLambda(key.Source, key.Target));
-    }
-
+    static Expression<Func<TSource, TTarget>> GetCreationLambda<TSource, TTarget>() 
+        => (Expression<Func<TSource, TTarget>>)GetCreationLambda(typeof(TSource), typeof(TTarget));
+    
+    internal static LambdaExpression GetCreationLambda(Type source, Type target) =>
+        MapLambdaExpressions.GetOrAdd((source, target),
+            key => MappingBuilder.BuildCreationLambda(key.Source, key.Target));    
 
 }
 #pragma warning restore S2955

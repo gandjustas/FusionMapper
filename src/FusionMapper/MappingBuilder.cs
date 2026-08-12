@@ -1,4 +1,5 @@
 using System.Collections.Concurrent;
+using System.ComponentModel.Design;
 using System.Diagnostics.CodeAnalysis;
 using System.Linq.Expressions;
 using System.Reflection;
@@ -8,19 +9,7 @@ namespace FusionMapper;
 
 static class MappingBuilder
 {
-    private static readonly string[] CollectionOperations = [
-        "FirstOrDefault",
-        "LastOrDefault",
-        "First",
-        "Last",
-        "Count",
-        "Average",
-        "Sum",
-        "Max",
-        "Min",
-        "Any",
-        "All"
-    ];
+
 
     public static LambdaExpression BuildCreationLambda(Type sourceType, Type targetType)
     {
@@ -103,8 +92,7 @@ static class MappingBuilder
                 }
 
                 return null;
-            })
-            .Where(x => x is not null);
+            });
 
         var readOnlyProperties = targetType
             .GetProperties(BindingFlags.Public | BindingFlags.Instance)
@@ -150,8 +138,7 @@ static class MappingBuilder
                 }
 
                 return null;
-            })
-            .Where(x => x is not null);
+            });
 
         var bodyExpressions = assignExpressions
             .Concat(fillCollectionExpressions)
@@ -310,96 +297,74 @@ static class MappingBuilder
         if (addRangeMethod is not null)
         {
             body.Add(Expression.Call(existingVar, addRangeMethod, mappedListVar));
-            return Expression.Block(
-                typeof(void),
-                [existingVar, sourceVar, mappedListVar],
-                body);
         }
         else
         {
-            // 1. Resolve types and methods
-            Type enumeratorType = typeof(IEnumerator<>).MakeGenericType(targetElementType);
-            var getEnumeratorMethod = mappedEnumerableType.GetMethod("GetEnumerator")
-                ?? typeof(IEnumerable<>).MakeGenericType(targetElementType).GetMethod("GetEnumerator");
-            var moveNextMethod = typeof(System.Collections.IEnumerator).GetMethod("MoveNext");
-            var currentProperty = enumeratorType.GetProperty("Current");
-            var disposeMethod = typeof(IDisposable).GetMethod("Dispose");
-
-
-            // 2. Define local variables for the block
-            var enumeratorVar = Expression.Variable(enumeratorType, "enumerator");
-            var itemVar = Expression.Variable(targetElementType, "item");
-
-            // 3. Define the break label for the loop
-            LabelTarget breakLabel = Expression.Label("LoopBreak");
-
-            // 4. Build loop mechanics
-            var assignEnumerator = Expression.Assign(
-                enumeratorVar,
-                Expression.Call(selectCall, getEnumeratorMethod!)
-            );
-
-            var moveNextCall = Expression.Call(enumeratorVar, moveNextMethod!);
-            var assignCurrent = Expression.Assign(
-                itemVar,
-                Expression.Property(enumeratorVar, currentProperty!)
-            );
-
-            // Invokes your custom loop body passing the loop variable
-            var loopBodyBlock = Expression.Block(
-                [itemVar],
-                assignCurrent,
-                Expression.Call(existingVar, addMethod!, itemVar)
-            );
-
-            // Assemble the structural Loop
-            var loop = Expression.Loop(
-                Expression.IfThenElse(
-                    Expression.Equal(moveNextCall, Expression.Constant(true)),
-                    loopBodyBlock,
-                    Expression.Break(breakLabel)
-                ),
-                breakLabel
-            );
-
-            // 5. Wrap inside TryFinally for IDisposable cleanup
-            var tryFinally = Expression.TryFinally(
-                loop,
-                Expression.Call(enumeratorVar, disposeMethod!)
-            );
-
-            // 6. Return standard block enclosing the enumerator variable scope
-            return Expression.Block([enumeratorVar], assignEnumerator, tryFinally);
+            body.Add(BuildAddFromEnumerableLoop(
+                existingVar,
+                addMethod!,
+                mappedListVar,
+                targetElementType));
         }
 
-
+        return Expression.Block(
+            typeof(void),
+            [existingVar, sourceVar, mappedListVar],
+            body);
     }
 
-    private static MethodInfo? FindCollectionClearMethod(Type type)
+    private static BlockExpression BuildAddFromEnumerableLoop(
+    Expression collection,
+    MethodInfo addMethod,
+    Expression source,
+    Type elementType)
     {
-        var method = type.GetMethod(
-            "Clear",
-            BindingFlags.Public | BindingFlags.Instance,
-            null,
-            Type.EmptyTypes,
-            null);
+        var enumerableType = typeof(IEnumerable<>).MakeGenericType(elementType);
+        var enumeratorType = typeof(IEnumerator<>).MakeGenericType(elementType);
 
-        if (method is not null)
-            return method;
+        var enumeratorVar = Expression.Variable(enumeratorType, "enumerator");
 
-        return type
-            .GetMethods(BindingFlags.Public | BindingFlags.Instance)
-            .FirstOrDefault(m =>
-                m.Name == "Clear" &&
-                m.GetParameters().Length == 0);
+        var getEnumeratorMethod = enumerableType.GetMethod(nameof(IEnumerable<>.GetEnumerator))
+            ?? typeof(IEnumerable<>).MakeGenericType(elementType).GetMethod(nameof(IEnumerable<>.GetEnumerator));
+        var moveNextMethod = typeof(System.Collections.IEnumerator).GetMethod(nameof(IEnumerator<>.MoveNext));
+        var currentProperty = enumeratorType.GetProperty(nameof(IEnumerator<>.Current));
+        var disposeMethod = typeof(IDisposable).GetMethod(nameof(IDisposable.Dispose));
+        var breakLabel = Expression.Label("LoopBreak");
+
+
+        var loop = Expression.Loop(
+            Expression.IfThenElse(
+                Expression.Call(enumeratorVar, moveNextMethod!),
+                Expression.Call(collection, addMethod, Expression.Property(enumeratorVar, currentProperty!)),
+                Expression.Break(breakLabel)),
+            breakLabel);
+
+        var tryFinally = Expression.TryFinally(
+            loop,
+            Expression.Call(enumeratorVar, disposeMethod!));
+
+        return Expression.Block(
+            typeof(void),
+            [enumeratorVar],
+            Expression.Assign(enumeratorVar, Expression.Call(source, getEnumeratorMethod!)),
+            tryFinally);
     }
+
+    private static MethodInfo? FindCollectionClearMethod(Type type) =>
+    type.GetMethod(
+        nameof(ICollection<>.Clear),
+        BindingFlags.Public | BindingFlags.Instance,
+        null,
+        Type.EmptyTypes,
+        null);
+
 
     private static MethodInfo? FindCollectionAddRangeMethod(Type type, Type elementType)
     {
         var enumerableType = typeof(IEnumerable<>).MakeGenericType(elementType);
 
         var method = type.GetMethod(
-            "AddRange",
+            nameof(List<>.AddRange),
             BindingFlags.Public | BindingFlags.Instance,
             null,
             [enumerableType],
@@ -411,7 +376,7 @@ static class MappingBuilder
         return type
             .GetMethods(BindingFlags.Public | BindingFlags.Instance)
             .FirstOrDefault(m =>
-                m.Name == "AddRange" &&
+                m.Name == nameof(List<>.AddRange) &&
                 m.GetParameters().Length == 1 &&
                 m.GetParameters()[0].ParameterType.IsAssignableFrom(enumerableType));
     }
@@ -419,7 +384,7 @@ static class MappingBuilder
     private static MethodInfo? FindCollectionAddMethod(Type type, Type elementType)
     {
         var method = type.GetMethod(
-            "Add",
+            nameof(ICollection<>.Add),
             BindingFlags.Public | BindingFlags.Instance,
             null,
             [elementType],
@@ -431,7 +396,7 @@ static class MappingBuilder
         return type
             .GetMethods(BindingFlags.Public | BindingFlags.Instance)
             .FirstOrDefault(m =>
-                m.Name == "Add" &&
+                m.Name == nameof(ICollection<>.Add) &&
                 m.GetParameters().Length == 1 &&
                 m.GetParameters()[0].ParameterType.IsAssignableFrom(elementType));
     }
@@ -450,14 +415,9 @@ static class MappingBuilder
 
         if (targetType.IsAssignableFrom(sourceType))
         {
-            if (targetType != sourceType &&
-                targetType.IsValueType &&
-                Nullable.GetUnderlyingType(targetType) is not null)
-            {
-                return Expression.Convert(sourceExpr, targetType);
-            }
-
-            return sourceExpr;
+            return targetType == sourceType
+                ? sourceExpr
+                : Expression.Convert(sourceExpr, targetType);
         }
 
         var sourceUnderlyingType = Nullable.GetUnderlyingType(sourceType);
@@ -582,28 +542,30 @@ static class MappingBuilder
     {
 
         var bindings = BuildMemberAssignments(sourceExpr, sourceNullability, targetType, path).ToArray();
-        var assignedMembers = bindings.Select(m => m.Member.Name);
+        var assignedMembers = bindings.Select(m => m.Member);
         var requiredMembers = GetRequiredMemberNames(targetType);
-        var needToAssign = requiredMembers.Except(assignedMembers, StringComparer.Ordinal).ToArray();
+        var needToAssign = requiredMembers.Except(assignedMembers).ToArray();
 
 
         var constructors = targetType
             .GetConstructors(BindingFlags.Public | BindingFlags.Instance)
-            .OrderByDescending(c => c.GetParameters().Length)
             .Select(c => BuildConstructorCall(c, sourceExpr, sourceNullability, path))
-            .Where(p => p != null)
-            .Select(p => p.Value)
+            .OfType<NewExpression>()
+            .OrderByDescending(p => p.Arguments.Count)
             .ToArray();
 
         if (constructors.Length == 0) throw new MappingException($"No suitable constructor found for type '{targetType.FullName}'.");
 
         string[] unassigned = [];
-        foreach (var (ex, args) in constructors)
+        foreach (var ex in constructors)
         {
-            unassigned = [.. needToAssign.Except(args, StringComparer.Ordinal)];
+            var args = ex.Constructor!
+                    .GetParameters()
+                    .Select(p => (p.Name!, p.ParameterType));
+            unassigned = [.. needToAssign.ExceptBy(args, m => (m.Name, GetMemberType(m)), MemberComparer.Instance).Select(p => p.Name)];
             if (ex.Constructor!.GetCustomAttribute<SetsRequiredMembersAttribute>() is { } || unassigned.Length == 0)
             {
-                return Expression.MemberInit(ex, bindings);
+                return Expression.MemberInit(ex, bindings.ExceptBy(args, m => (m.Member.Name, GetMemberType(m.Member)), MemberComparer.Instance));
             }
         }
         throw new MappingException($"Required members of type '{targetType.FullName}' is not mapped: {string.Join(',', unassigned.Select(x => "'" + x + "'"))}.");
@@ -664,7 +626,7 @@ static class MappingBuilder
         }
     }
 
-    private static (NewExpression Expression, IEnumerable<string> Args)? BuildConstructorCall(
+    private static NewExpression? BuildConstructorCall(
     ConstructorInfo constructor,
     Expression sourceExpr,
     NullabilityState sourceNullability,
@@ -694,29 +656,35 @@ static class MappingBuilder
 
             if (!initialized.Contains(parameter))
             {
-                if (paramNullability != NullabilityState.Nullable) return null;
-                args.Add(Expression.Constant(null, parameter.ParameterType));
-            }
+                var canBeNull =
+                    paramNullability == NullabilityState.Nullable ||
+                    paramNullability == NullabilityState.Unknown && CanBeNull(parameter.ParameterType);
 
+                if (!canBeNull)
+                    return null;
+
+                args.Add(Expression.Constant(null, parameter.ParameterType));
+                initialized.Add(parameter);
+            }
         }
 
-        return (args.Count > 0
+        return args.Count > 0
             ? Expression.New(constructor, args)
-            : Expression.New(constructor), initialized.Select(p => p.Name!));
+            : Expression.New(constructor);
 
     }
 
-    private static IEnumerable<string> GetRequiredMemberNames(Type targetType)
+    private static IEnumerable<MemberInfo> GetRequiredMemberNames(Type targetType)
     {
         var properties = targetType
             .GetProperties(BindingFlags.Public | BindingFlags.Instance)
             .Where(p => p.GetCustomAttribute<RequiredMemberAttribute>() is not null)
-            .Select(p => p.Name);
+            .OfType<MemberInfo>();
 
         var fields = targetType
             .GetFields(BindingFlags.Public | BindingFlags.Instance)
             .Where(f => f.GetCustomAttribute<RequiredMemberAttribute>() is not null)
-            .Select(f => f.Name);
+            .OfType<MemberInfo>();
 
         return properties.Concat(fields);
     }
@@ -776,21 +744,40 @@ static class MappingBuilder
         }
 
         var defaultCtor = targetCollectionType.GetConstructor(Type.EmptyTypes);
-        if (defaultCtor != null)
+        if (defaultCtor is not null)
         {
-            var newCollection = Expression.New(defaultCtor);
+            var collectionVar = Expression.Variable(targetCollectionType, "collection");
 
-            var addRangeMethod = targetCollectionType.GetMethod(
-                "AddRange",
-                [typeof(IEnumerable<>).MakeGenericType(targetElementType)]);
+            List<Expression> body = [Expression.Assign(collectionVar, Expression.New(defaultCtor))];
 
-            if (addRangeMethod != null)
+            var addRangeMethod = FindCollectionAddRangeMethod(targetCollectionType, targetElementType);
+            var addMethod = FindCollectionAddMethod(targetCollectionType, targetElementType);
+
+            if (addRangeMethod is not null)
             {
-                return Expression.Call(newCollection, addRangeMethod, selectCall);
+                body.Add(Expression.Call(collectionVar, addRangeMethod, selectCall));
+            }
+            else if (addMethod is not null)
+            {
+                body.Add(BuildAddFromEnumerableLoop(
+                    collectionVar,
+                    addMethod,
+                    selectCall,
+                    targetElementType));
+            }
+            else
+            {
+                throw new MappingException(
+                    $"Cannot map collection to type '{targetCollectionType.FullName}'. " +
+                    "The collection must expose a public AddRange or Add method.");
             }
 
-            throw new MappingException(
-                $"Cannot map collection to type '{targetCollectionType.FullName}' because it has no AddRange method.");
+            body.Add(collectionVar);
+
+            return Expression.Block(
+                targetCollectionType,
+                [collectionVar],
+                body);
         }
 
         throw new MappingException($"Cannot map collection to type '{targetCollectionType.FullName}'.");
@@ -811,7 +798,9 @@ static class MappingBuilder
         if (suffix.StartsWith('_')) suffix = suffix[1..];
 
         var sourceType = sourceExpr.Type;
-        var candidates = GetSourceMembers(sourceType).ToList();
+        var candidates = GetSourceMembers(sourceType)
+            .OrderByDescending(m => m.Name.Length)
+            .ToList();
 
         var exactMatches = candidates.Where(m => suffix.StartsWith(m.Name, StringComparison.Ordinal)).ToArray();
         var caseInsensitiveMatches = candidates.Except(exactMatches).Where(m => suffix.StartsWith(m.Name, StringComparison.OrdinalIgnoreCase));
@@ -825,7 +814,7 @@ static class MappingBuilder
 
             foreach (var (ex, n) in rec)
             {
-                yield return (nullability == NullabilityState.NotNull ? ex : WrapNullCoalescingOperator(sourceExpr, ex), n);
+                yield return (WrapNullCheck(sourceExpr, ex, n), n);
             }
         }
 
@@ -859,7 +848,7 @@ static class MappingBuilder
 
                 foreach (var (ex, n) in rec)
                 {
-                    yield return (nullability == NullabilityState.NotNull ? ex : WrapNullCoalescingOperator(sourceExpr, ex), n);
+                    yield return (WrapNullCheck(sourceExpr, ex, n), n);
                 }
             }
             else
@@ -873,7 +862,7 @@ static class MappingBuilder
 
                     foreach (var (ex, n) in rec)
                     {
-                        yield return (nullability == NullabilityState.NotNull ? ex : WrapNullCoalescingOperator(sourceExpr, ex), n);
+                        yield return (WrapNullCheck(sourceExpr, ex, n), n);
                     }
                 }
             }
@@ -939,18 +928,28 @@ static class MappingBuilder
                 && p.ParameterType.IsAssignableFrom(source.Type);
             });
 
-    private static ConditionalExpression WrapNullCoalescingOperator(Expression source, Expression target)
+    private static Expression WrapNullCheck(
+        Expression source,
+        Expression target,
+        NullabilityState nullability)
     {
-        var targetType = target.Type;
-        if (targetType.IsValueType && Nullable.GetUnderlyingType(targetType) == null)
+        if (nullability == NullabilityState.NotNull || !CanBeNull(source.Type))
         {
-            targetType = typeof(Nullable<>).MakeGenericType(targetType);
+            return target;
         }
+
+        var resultType = target.Type;
+
+        if (resultType.IsValueType && Nullable.GetUnderlyingType(resultType) is null)
+        {
+            resultType = typeof(Nullable<>).MakeGenericType(resultType);
+        }
+
         return Expression.Condition(
             Expression.Equal(source, Expression.Constant(null, source.Type)),
-            Expression.Default(targetType),
-            target.Type == targetType ? target : Expression.Convert(target, targetType),
-            targetType);
+            Expression.Default(resultType),
+            target.Type == resultType ? target : Expression.Convert(target, resultType),
+            resultType);
     }
 
     private static bool CanBeNull(Type type)
@@ -1065,6 +1064,20 @@ static class MappingBuilder
         _ => throw new InvalidOperationException("Unsupported member type")
     };
 
+    private static readonly string[] CollectionOperations = [
+    nameof(Enumerable.FirstOrDefault),
+    nameof(Enumerable.LastOrDefault),
+    nameof(Enumerable.First),
+    nameof(Enumerable.Last),
+    nameof(Enumerable.Count),
+    nameof(Enumerable.Average),
+    nameof(Enumerable.Sum),
+    nameof(Enumerable.Max),
+    nameof(Enumerable.Min),
+    nameof(Enumerable.Any),
+    nameof(Enumerable.All)
+    ];
+
     private static readonly MethodInfo ObjectToStringMethod =
         typeof(object).GetMethod(nameof(object.ToString), Type.EmptyTypes)!;
 
@@ -1098,4 +1111,17 @@ static class MappingBuilder
         }
     }
 
+    private sealed class MemberComparer : IEqualityComparer<(string, Type)>
+    {
+        public static readonly MemberComparer Instance = new();
+
+        public bool Equals((string, Type) x, (string, Type) y) =>
+            x.Item2 == y.Item2 && Normalize(x.Item1) == Normalize(y.Item1);
+
+        public int GetHashCode([DisallowNull] (string, Type) obj) =>
+            HashCode.Combine(obj.Item2, Normalize(obj.Item1));
+
+        private static string Normalize(string value) =>
+            value.TrimStart('_').ToLowerInvariant() ?? string.Empty;
+    }
 }

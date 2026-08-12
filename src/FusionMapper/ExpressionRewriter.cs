@@ -4,73 +4,63 @@ namespace FusionMapper;
 
 internal sealed class ExpressionRewriter : ExpressionVisitor
 {
-    protected override Expression VisitMethodCall(MethodCallExpression node)
+    protected override Expression VisitMethodCall(MethodCallExpression node) => node switch
     {
-        if (IsFusionSourceTo(node))
-        {
-            if (node.Arguments.Count != 0)
-            {
-                throw new MappingException(
-                    "Mapping into an existing object using 'Map().To(target)' is not supported inside query expression trees.");
-            }
+        _ when IsFusionSourceTo(node) => RewriteSourceTo(node),
+        _ when IsFusionProjectionTo(node) => RewriteProjectionTo(node),
+        _ when IsFusionMap(node) => throw new MappingException(
+            "Unsupported FusionMapper call in expression tree. " +
+            "'Map()' must be immediately followed by '.To<T>()'."),
+        _ when IsFusionProject(node) => throw new MappingException(
+            "Unsupported FusionMapper call in expression tree. " +
+            "'Project()' must be immediately followed by '.To<T>()'."),
+        _ when node.Method.DeclaringType == typeof(FusionMapper) => throw new MappingException(
+            $"Unsupported FusionMapper call '{node.Method.Name}' inside query expression tree."),
+        _ => base.VisitMethodCall(node) ?? node
+    };
 
-            var instance = UnwrapConversion(node.Object!);
-
-            if (instance is MethodCallExpression mapCall && IsFusionMap(mapCall))
-            {
-                var sourceExpression = Visit(mapCall.Arguments[0]) ?? mapCall.Arguments[0];
-                var sourceType = mapCall.Method.GetGenericArguments()[0];
-                var targetType = node.Method.GetGenericArguments()[0];
-
-                return InlineProjection(sourceExpression, sourceType, targetType);
-            }
-
-            throw new MappingException(
-                "Unsupported FusionMapper call in expression tree. 'To<T>()' can only be rewritten when it is called on 'x.Map()'.");
-        }
-
-        if (IsFusionProjectionTo(node))
-        {
-            if (node.Arguments.Count != 0)
-            {
-                throw new MappingException(
-                    "Only the parameterless 'Project().To<T>()' form is supported inside query expression trees.");
-            }
-
-            var instance = UnwrapConversion(node.Object!);
-
-            if (instance is MethodCallExpression projectCall && IsFusionProject(projectCall))
-            {
-                var queryExpression = Visit(projectCall.Arguments[0]) ?? projectCall.Arguments[0];
-                var sourceType = projectCall.Method.GetGenericArguments()[0];
-                var targetType = node.Method.GetGenericArguments()[0];
-
-                return BuildQueryableSelect(queryExpression, sourceType, targetType);
-            }
-
-            throw new MappingException(
-                "Unsupported FusionMapper call in expression tree. 'To<T>()' can only be rewritten when it is called on 'queryable.Project()'.");
-        }
-
-        if (IsFusionMap(node))
+    private Expression RewriteSourceTo(MethodCallExpression node)
+    {
+        if (node.Arguments.Count != 0)
         {
             throw new MappingException(
-                "Unsupported FusionMapper call in expression tree. 'Map()' must be immediately followed by '.To<T>()'.");
+                "Mapping into an existing object using 'Map().To(target)' is not supported inside query expression trees.");
         }
 
-        if (IsFusionProject(node))
+        if (UnwrapConversion(node.Object!) is MethodCallExpression mapCall && IsFusionMap(mapCall))
+        {
+            var sourceExpression = Visit(mapCall.Arguments[0]) ?? mapCall.Arguments[0];
+            var sourceType = mapCall.Method.GetGenericArguments()[0];
+            var targetType = node.Method.GetGenericArguments()[0];
+
+            return InlineProjection(sourceExpression, sourceType, targetType);
+        }
+
+        throw new MappingException(
+            "Unsupported FusionMapper call in expression tree. " +
+            "'To<T>()' can only be rewritten when it is called on 'x.Map()'.");
+    }
+
+    private MethodCallExpression RewriteProjectionTo(MethodCallExpression node)
+    {
+        if (node.Arguments.Count != 0)
         {
             throw new MappingException(
-                "Unsupported FusionMapper call in expression tree. 'Project()' must be immediately followed by '.To<T>()'.");
+                "Only the parameterless 'Project().To<T>()' form is supported inside query expression trees.");
         }
 
-        if (node.Method.DeclaringType == typeof(FusionMapper))
+        if (UnwrapConversion(node.Object!) is MethodCallExpression projectCall && IsFusionProject(projectCall))
         {
-            throw new MappingException(
-                $"Unsupported FusionMapper call '{node.Method.Name}' inside query expression tree.");
+            var queryExpression = Visit(projectCall.Arguments[0]) ?? projectCall.Arguments[0];
+            var sourceType = projectCall.Method.GetGenericArguments()[0];
+            var targetType = node.Method.GetGenericArguments()[0];
+
+            return BuildQueryableSelect(queryExpression, sourceType, targetType);
         }
 
-        return base.VisitMethodCall(node)!;
+        throw new MappingException(
+            "Unsupported FusionMapper call in expression tree. " +
+            "'To<T>()' can only be rewritten when it is called on 'queryable.Project()'.");
     }
 
     private Expression InlineProjection(Expression sourceExpression, Type sourceType, Type targetType)
@@ -100,7 +90,7 @@ internal sealed class ExpressionRewriter : ExpressionVisitor
         Type sourceType,
         Type targetType)
     {
-        var lambda = MappingBuilder.BuildCreationLambda(sourceType, targetType);
+        var lambda = FusionMapper.GetCreationLambda(sourceType, targetType);
         var expectedQueryableType = typeof(IQueryable<>).MakeGenericType(sourceType);
 
         if (!expectedQueryableType.IsAssignableFrom(queryExpression.Type))
