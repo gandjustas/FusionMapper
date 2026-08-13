@@ -220,7 +220,7 @@ static class MappingBuilder
                 Expression.Equal(existingVar, Expression.Constant(null, targetCollectionType)),
                 Expression.Throw(
                     Expression.New(
-                        typeof(MappingException).GetConstructor([typeof(string)])!,
+                        typeof(InvalidOperationException).GetConstructor([typeof(string)])!,
                         Expression.Constant(
                             $"Read-only collection member '{member.Name}' is null and cannot be mutated. " +
                             $"Target member type: '{targetCollectionType.FullName}'.")),
@@ -468,7 +468,7 @@ static class MappingBuilder
                 ? Expression.Default(targetType)
                 : Expression.Throw(
                     Expression.New(
-                        typeof(MappingException).GetConstructor([typeof(string)])!,
+                        typeof(InvalidOperationException).GetConstructor([typeof(string)])!,
                         Expression.Constant(
                             $"Cannot map null source to non-nullable target type '{targetType.FullName}'.")),
                     targetType);

@@ -31,7 +31,7 @@ public class NullableMappingTests
     {
         var source = new SourceWithNullable { NullableInt = null, NullableString = null, NullableDateTime = null };
         await Assert.That(() => source.Map().To<TargetWithNonNullable>())
-            .Throws<MappingException>();
+            .Throws<InvalidOperationException>();
     }
 
     [Test]
