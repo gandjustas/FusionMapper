@@ -90,7 +90,7 @@ internal sealed class ExpressionRewriter : ExpressionVisitor
         Type sourceType,
         Type targetType)
     {
-        var lambda = FusionMapper.GetCreationLambda(sourceType, targetType);
+        var lambda = FusionMapper.State.GetCreationLambda(sourceType, targetType);
         var expectedQueryableType = typeof(IQueryable<>).MakeGenericType(sourceType);
 
         if (!expectedQueryableType.IsAssignableFrom(queryExpression.Type))

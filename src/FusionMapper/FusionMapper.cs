@@ -18,7 +18,16 @@ public static class FusionMapper
         internal static readonly ConcurrentDictionary<(Type Source, Type Target), Delegate> MapDelegates = new();
         internal static readonly ConcurrentDictionary<(Type Source, Type Target), Delegate> MapToExistingDelegates = new();
         internal static readonly ConcurrentDictionary<(Type Source, Type Target), LambdaExpression> MapLambdaExpressions = new();
+        internal static LambdaExpression GetCreationLambda(Type source, Type target) =>
+            MapLambdaExpressions.GetOrAdd((source, target),
+                key => MappingBuilder.BuildCreationLambda(key.Source, key.Target));
+        internal static Delegate GetCreationDelegate(Type source, Type target) => 
+            MapDelegates.GetOrAdd((source, target),
+                key => GetCreationLambda(key.Source, key.Target).Compile());
 
+        internal static Delegate GetAssignmentDelegate(Type source, Type target) => 
+            MapToExistingDelegates.GetOrAdd((source, target),
+                key => MappingBuilder.BuildAssignmentExpression(key.Source, key.Target).Compile());
     }
 
     public static FusionSource<TSource> Map<TSource>(this TSource source)
@@ -37,9 +46,7 @@ public static class FusionMapper
             return default!;
         }
 
-        var func = (Func<TSource, TTarget>)State.MapDelegates.GetOrAdd(
-            (sourceType, targetType),
-            _ => GetCreationLambda<TSource, TTarget>().Compile());
+        var func = (Func<TSource, TTarget>)State.GetCreationDelegate(sourceType, targetType);
 
         return func(source);
     }
@@ -53,11 +60,7 @@ public static class FusionMapper
 
         ArgumentNullException.ThrowIfNull(target);
 
-        var del = State.MapToExistingDelegates.GetOrAdd(
-            (typeof(TSource), typeof(TTarget)),
-            key => MappingBuilder.BuildAssignmentExpression(key.Source, key.Target).Compile());
-
-        var action = (Action<TSource, TTarget>)del;
+        var action = (Action<TSource, TTarget>)State.GetAssignmentDelegate(typeof(TSource), typeof(TTarget));
         action(source, target);
 
         return target;
@@ -68,8 +71,8 @@ public static class FusionMapper
         ArgumentNullException.ThrowIfNull(source);
 
         var rewrittenSource = Rewrite(source);
-
-        return rewrittenSource.Select(GetCreationLambda<TSource, TTarget>());
+        var lambda = (Expression<Func<TSource, TTarget>>)State.GetCreationLambda(typeof(TSource), typeof(TTarget));
+        return rewrittenSource.Select(lambda);
     }
 
     internal static IQueryable<TTarget> Rewrite<TTarget>(IQueryable<TTarget> query)
@@ -90,14 +93,6 @@ public static class FusionMapper
 
         return query.Provider.CreateQuery<TTarget>(newExpression);
     }
-
-    static Expression<Func<TSource, TTarget>> GetCreationLambda<TSource, TTarget>()
-        => (Expression<Func<TSource, TTarget>>)GetCreationLambda(typeof(TSource), typeof(TTarget));
-
-    internal static LambdaExpression GetCreationLambda(Type source, Type target) =>
-        State.MapLambdaExpressions.GetOrAdd(
-            (source, target),
-            key => MappingBuilder.BuildCreationLambda(key.Source, key.Target));
 }
 #pragma warning restore S2955
 
