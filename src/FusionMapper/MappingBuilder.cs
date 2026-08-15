@@ -8,8 +8,6 @@ namespace FusionMapper;
 
 static class MappingBuilder
 {
-
-
     public static LambdaExpression BuildCreationLambda(Type sourceType, Type targetType)
     {
         var sourceParam = Expression.Parameter(sourceType, "source");
@@ -18,7 +16,7 @@ static class MappingBuilder
         using var guard = path.Push(targetType, sourceType);
 
 
-        if (BuildMappingBody(
+        if (BuildCreationBody(
             sourceParam, sourceNullability: NullabilityState.Unknown,
             targetType, targetNullability: NullabilityState.Unknown,
             path) is { } body)
@@ -30,16 +28,79 @@ static class MappingBuilder
             throw new MappingException($"Can't map {sourceParam.Type} to {targetType}.");
         }
     }
-
-    public static LambdaExpression BuildAssignmentExpression(Type sourceType, Type targetType)
+    public static LambdaExpression BuildAssignmentLambda(Type sourceType, Type targetType)
     {
         var sourceParam = Expression.Parameter(sourceType, "source");
         var targetParam = Expression.Parameter(targetType, "target");
 
         MappingPath path = new();
+        using var rootGuard = path.Push(targetType, sourceType);
+
+        var body = BuildNonNullAssignmentBody(
+            sourceParam,
+            targetParam,
+            path);
+
+        if (body.Expressions.Count == 0)
+        {
+            throw new MappingException(
+                $"Nothing were mapped from '{sourceType.FullName}' to '{targetType.FullName}'.");
+        }
+
+        // Явно создаём Action<TSource, TTarget>, чтобы избежать проблем с кастом LambdaExpression.
+        var delegateType = typeof(Action<,>).MakeGenericType(sourceType, targetType);
+        return Expression.Lambda(delegateType, body, sourceParam, targetParam);
+
+    }
+
+    public static IEnumerable<Expression> BuildAssignmentBody(
+        Expression source,
+        NullabilityState sourceNullability,
+        Expression target,
+        NullabilityState targetNullability,
+        MappingPath path)
+    {
+        var sourceType = source.Type;
+        var targetType = target.Type;
+
+        var returnLabel = Expression.Label(targetType, "MapToExistingReturn");
+
+        // source == null -> вернуть target как есть
+        if (sourceNullability != NullabilityState.NotNull || CanBeNull(sourceType))
+        {
+            yield return Expression.IfThen(
+                    Expression.Equal(source, Expression.Constant(null, sourceType)),
+                    Expression.Return(returnLabel));
+        }
+
+        // target == null -> создать новый через creation-маппинг
+        if (targetNullability != NullabilityState.NotNull || CanBeNull(targetType))
+        {
+            var createNew = BuildNonNullMappingBody(source, NullabilityState.NotNull, targetType, path);
+
+            yield return Expression.IfThen(
+                    Expression.Equal(target, Expression.Constant(null, targetType)),
+                    Expression.Return(returnLabel));
+        }
+
+        var body = BuildNonNullAssignmentBody(source, target, path);
+        if (body.Expressions.Count == 0)
+        {
+            throw new MappingException(
+                $"Nothing were mapped from '{sourceType.FullName}' to '{targetType.FullName}'.");
+        }
+        yield return Expression.Label(returnLabel);
+    }
+
+    public static BlockExpression BuildNonNullAssignmentBody(
+        Expression source,
+        Expression target,
+        MappingPath path)
+    {
+        var sourceType = source.Type;
+        var targetType = target.Type;
 
         // Корневая пара нужна, чтобы recursion detection видел полный путь.
-        using var rootGuard = path.Push(targetType, sourceType);
 
         var writableProperties = targetType
             .GetProperties(BindingFlags.Public | BindingFlags.Instance)
@@ -61,11 +122,11 @@ static class MappingBuilder
                 var targetNullability = GetMemberNullability(member).WriteState;
 
                 foreach (var (accessExpr, sourceNullability)
-                    in GetSourceMemberAccess(sourceParam, NullabilityState.NotNull, member.Name))
+                    in GetSourceMemberAccess(source, NullabilityState.NotNull, member.Name))
                 {
                     using var guard = path.Push(memberType, accessExpr.Type);
 
-                    if (BuildMappingBody(
+                    if (BuildCreationBody(
                             accessExpr,
                             sourceNullability,
                             memberType,
@@ -86,7 +147,7 @@ static class MappingBuilder
                     }
 
                     return (Expression)Expression.Assign(
-                        Expression.MakeMemberAccess(targetParam, member),
+                        Expression.MakeMemberAccess(target, member),
                         mappedExpr);
                 }
 
@@ -116,7 +177,7 @@ static class MappingBuilder
                     return null;
 
                 foreach (var (accessExpr, nullability)
-                    in GetSourceMemberAccess(sourceParam, NullabilityState.NotNull, member.Name))
+                    in GetSourceMemberAccess(source, NullabilityState.NotNull, member.Name))
                 {
                     // Если кандидат не является коллекцией, пробуем следующего кандидата.
                     if (!IsCollectionType(accessExpr.Type, out _))
@@ -125,11 +186,11 @@ static class MappingBuilder
                     using var guard = path.Push(targetMemberType, accessExpr.Type);
 
                     if (BuildReadOnlyCollectionMutation(
-                            targetParam,
-                            member,
-                            targetMemberType,
                             accessExpr,
                             nullability,
+                            target,
+                            member,
+                            targetMemberType,
                             path) is { } mutation)
                     {
                         return (Expression)mutation;
@@ -141,30 +202,18 @@ static class MappingBuilder
 
         var bodyExpressions = assignExpressions
             .Concat(fillCollectionExpressions)
-            .OfType<Expression>()
-            .ToArray();
+            .OfType<Expression>();
 
-        if (bodyExpressions.Length == 0)
-        {
-            throw new MappingException(
-                $"No members were mapped from '{sourceType.FullName}' to '{targetType.FullName}'.");
-        }
-
-        var body = Expression.Block(typeof(void), bodyExpressions);
-
-        // Явно создаём Action<TSource, TTarget>, чтобы избежать проблем с кастом LambdaExpression.
-        var delegateType = typeof(Action<,>).MakeGenericType(sourceType, targetType);
-
-        return Expression.Lambda(delegateType, body, sourceParam, targetParam);
+        return Expression.Block(typeof(void), bodyExpressions);
     }
 
 
     private static BlockExpression? BuildReadOnlyCollectionMutation(
-        ParameterExpression targetParam,
-        MemberInfo member,
-        Type targetCollectionType,
         Expression sourceAccess,
         NullabilityState sourceNullability,
+        Expression target,
+        MemberInfo member,
+        Type targetCollectionType,
         MappingPath path)
     {
         if (!IsCollectionType(targetCollectionType, out var targetElementType) ||
@@ -203,7 +252,7 @@ static class MappingBuilder
 
         var mappedEnumerableType = typeof(IEnumerable<>).MakeGenericType(targetElementType);
 
-        var memberAccess = Expression.MakeMemberAccess(targetParam, member);
+        var memberAccess = Expression.MakeMemberAccess(target, member);
 
         var existingVar = Expression.Variable(targetCollectionType, $"{member.Name}_existing");
         var sourceVar = Expression.Variable(sourceAccess.Type, $"{member.Name}_source");
@@ -236,7 +285,7 @@ static class MappingBuilder
         // Пушим пару элементов, чтобы корректно детектить рекурсию на уровне element mapping.
         using (path.Push(targetElementType, sourceElementType))
         {
-            if (BuildMappingBody(
+            if (BuildCreationBody(
                     itemParam,
                     sourceNullability: NullabilityState.NotNull,
                     targetType: targetElementType,
@@ -400,7 +449,7 @@ static class MappingBuilder
                 m.GetParameters()[0].ParameterType.IsAssignableFrom(elementType));
     }
 
-    private static Expression? BuildMappingBody(
+    private static Expression? BuildCreationBody(
         Expression sourceExpr,
         NullabilityState sourceNullability,
         Type targetType,
@@ -589,7 +638,7 @@ static class MappingBuilder
                 in GetSourceMemberAccess(sourceExpr, sourceNullability, property.Name!))
             {
                 using var guard = path.Push(property.PropertyType, accessExpr.Type);
-                if (BuildMappingBody(accessExpr,
+                if (BuildCreationBody(accessExpr,
                     nullability,
                     targetType: property.PropertyType, SafeNullability(property).WriteState,
                     path) is { } mappedExpr)
@@ -614,7 +663,7 @@ static class MappingBuilder
                 in GetSourceMemberAccess(sourceExpr, sourceNullability, field.Name!))
             {
                 using var guard = path.Push(field.FieldType, accessExpr.Type);
-                if (BuildMappingBody(accessExpr, nullability,
+                if (BuildCreationBody(accessExpr, nullability,
                     field.FieldType, SafeNullability(field).WriteState,
                     path) is { } mappedExpr)
                 {
@@ -643,7 +692,7 @@ static class MappingBuilder
                     in GetSourceMemberAccess(sourceExpr, sourceNullability, parameter.Name!))
             {
                 using var guard = path.Push(parameter.ParameterType, accessExpr.Type);
-                if (BuildMappingBody(accessExpr, nullability,
+                if (BuildCreationBody(accessExpr, nullability,
                     parameter.ParameterType, paramNullability,
                     path: path) is { } mappedExpr)
                 {
@@ -696,7 +745,7 @@ static class MappingBuilder
         MappingPath path)
     {
         var itemParam = Expression.Parameter(sourceElementType, "item");
-        if (BuildMappingBody(itemParam, NullabilityState.NotNull,
+        if (BuildCreationBody(itemParam, NullabilityState.NotNull,
             targetElementType, NullabilityState.Unknown,
             path) is not { } mappedItem) return null;
         var lambda = Expression.Lambda(mappedItem, itemParam);

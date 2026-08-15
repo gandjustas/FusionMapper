@@ -2,20 +2,19 @@
 using Microsoft.CodeAnalysis;
 using Microsoft.CodeAnalysis.CSharp;
 
-namespace FusionMapper.SourceGeneration;
+namespace FusionMapper.SourceGenerator;
 
 static class InterceptorGenerator
 {
-    public static string Execute(IEnumerable<Candidate> candidates)
+    public static string Execute(IEnumerable<Interceptable> candidates)
     {
-
         StringBuilder sb = GenerateHeader();
 
         foreach (var group in candidates.GroupBy(c => (c.Source, c.Target, c.Kind)))
         {
             foreach (var candidate in group)
             {
-                AppendInterceptsLocation(sb, candidate.Interceptable);                
+                AppendInterceptsLocation(sb, candidate.Location);                
             }
             GenerateInterceptorMethod(sb, group.Key.Kind, group.Key.Source, group.Key.Target);
             sb.AppendLine();
@@ -52,7 +51,7 @@ static class InterceptorGenerator
                 }
             }
             
-            namespace FusionMapper.Interceptors
+            namespace {{System.Reflection.Assembly.GetExecutingAssembly().GetName().Name}}.Interceptors
             {
             """");
 

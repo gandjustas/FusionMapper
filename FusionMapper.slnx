@@ -2,11 +2,9 @@
   <Folder Name="/benchmarks/">
     <Project Path="benchmarks/FusionMapper.Benchmarks/FusionMapper.Benchmarks.csproj" />
   </Folder>
-  <Folder Name="/Solution Items/">
-    <File Path=".editorconfig" />
-  </Folder>
+  <Folder Name="/Solution Items/" />
   <Folder Name="/src/">
-    <Project Path="src/FusionMapper.SourceGeneration/FusionMapper.SourceGeneration.csproj" />
+    <Project Path="src/FusionMapper.SourceGenerator/FusionMapper.SourceGenerator.csproj" />
     <Project Path="src/FusionMapper/FusionMapper.csproj" />
   </Folder>
   <Folder Name="/tests/">

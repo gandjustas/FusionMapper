@@ -5,7 +5,13 @@
 		<LangVersion>latest</LangVersion>
 		<ImplicitUsings>enable</ImplicitUsings>
 		<Nullable>enable</Nullable>
-	    <TreatWarningsAsErrors>True</TreatWarningsAsErrors>
+	    <TreatWarningsAsErrors>False</TreatWarningsAsErrors>
+		<WarningsAsErrors>$(WarningsAsErrors);NU1605;Nullable</WarningsAsErrors>
+	</PropertyGroup>
+
+
+	<PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Release|AnyCPU'">
+		<TreatWarningsAsErrors>True</TreatWarningsAsErrors>
 	</PropertyGroup>
 
 </Project>

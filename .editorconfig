@@ -1,3 +1,0 @@
-﻿[*.cs]
-
-dotnet_diagnostic.RSEXPERIMENTAL002.severity = silent

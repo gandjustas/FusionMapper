@@ -1,0 +1,8 @@
+<Project InitialTargets="FusionMapper_Interceptors">
+  <Target Name="FusionMapper_Interceptors">
+    <PropertyGroup Condition="'$(EnableFusionMapperInterceptor)' != 'false'">
+      <InterceptorsNamespaces>$(InterceptorsNamespaces);$(RootNamespace).Interceptors</InterceptorsNamespaces>
+      <InterceptorsPreviewNamespaces>$(InterceptorsPreviewNamespaces);$(RootNamespace).Interceptors</InterceptorsPreviewNamespaces>
+    </PropertyGroup>
+  </Target>
+</Project>

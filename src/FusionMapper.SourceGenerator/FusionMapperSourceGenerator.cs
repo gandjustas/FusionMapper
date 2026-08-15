@@ -1,15 +1,12 @@
-﻿using System.Collections.Immutable;
-using System.Diagnostics;
+﻿using System.Reflection.Metadata;
 using System.Text;
-using System.Text.RegularExpressions;
-using System.Transactions;
 using Microsoft.CodeAnalysis;
 using Microsoft.CodeAnalysis.CSharp;
 using Microsoft.CodeAnalysis.CSharp.Syntax;
 using Microsoft.CodeAnalysis.Operations;
 using Microsoft.CodeAnalysis.Text;
 
-namespace FusionMapper.SourceGeneration;
+namespace FusionMapper.SourceGenerator;
 
 [Generator(LanguageNames.CSharp)]
 public sealed class FusionMapperInterceptorGenerator : IIncrementalGenerator
@@ -29,9 +26,16 @@ public sealed class FusionMapperInterceptorGenerator : IIncrementalGenerator
 
     public void Initialize(IncrementalGeneratorInitializationContext context)
     {
+
+        var interceptionEnabledSetting = context.AnalyzerConfigOptionsProvider
+            .Select((x, _) =>
+                x.GlobalOptions.TryGetValue($"build_property.EnableFusionMapperInterceptor", out var enableSwitch)
+                && !enableSwitch.Equals("false", StringComparison.Ordinal))
+            .WithTrackingName(TrackingNames.InterceptorsIsEnabled);
+
         var csharpSufficient = context.CompilationProvider
             .Select((x, _) => x is CSharpCompilation { LanguageVersion: LanguageVersion.Default or >= LanguageVersion.CSharp12 })
-            .WithTrackingName(TrackingNames.Settings);
+            .WithTrackingName(TrackingNames.CSharpVersion);
 
         IncrementalValueProvider<int> targetFrameworkProvider = context.AnalyzerConfigOptionsProvider
             .Select((options, _) =>
@@ -43,34 +47,52 @@ public sealed class FusionMapperInterceptorGenerator : IIncrementalGenerator
                     return version;
                 }
                 return 8; //Minimum version for C#12
-            });
+            })
+        .WithTrackingName(TrackingNames.DotnetVersion);
 
-        var options = csharpSufficient.Combine(targetFrameworkProvider)
+        var options = csharpSufficient
+            .Combine(interceptionEnabledSetting)
+            .Select((t, _) => t.Left && t.Right)
+            .Combine(targetFrameworkProvider)
             .Select((t, _) => new GeneratorOptions(t.Left, t.Right));
 
 
-        var candidates = context.SyntaxProvider
-             .CreateSyntaxProvider(IsCandidate, Transform)
-             .Where(static c => c is not null)
-             .Select(static (c, _) => c!.Value)
-             .WithTrackingName(TrackingNames.Candidates);
+        var rawCandidates = context.SyntaxProvider
+            .CreateSyntaxProvider(IsCandidate, Transform)
+            .Where(static c => c is not null)
+            .Select(static (c, _) => c!.Value);
+
+        var mappings = rawCandidates.Collect().Combine(context.CompilationProvider)
+            .Select((t, ct) => MappingBuilder.CreateMappings(t.Left, t.Right, ct))
+            .WithComparer(ImmutableDictionaryComparer<(TypeModel Source, TypeModel Target), Mapping>.Default)
+            .WithTrackingName(TrackingNames.Mappings);
+
+        var interceptableCandidates = rawCandidates.Where(static c => !c.SourceSymbol.IsAnonymousType && !c.TargetSymbol.IsAnonymousType && !c.IsInsideExpressionTree)
+            .Select(static (c, _) => new Interceptable(
+                c.Interceptable,
+                c.Kind,
+                c.Source,
+                c.Target
+            ))
+            .WithTrackingName(TrackingNames.Candidates);
+
 
         // Use the provider inside your source output register step
 
-        context.RegisterSourceOutput(candidates.Collect().Combine(options), static (spc, candidate) =>
+        context.RegisterSourceOutput(interceptableCandidates.Collect().Combine(options), static (spc, candidate) =>
         {
             var (candidates, options) = candidate;
 
             if (!options.IsEnabled) return;
 
-            foreach (var c in candidates.Where(c => c.IsAnonymous))
-            {
-                spc.ReportDiagnostic(Diagnostic.Create(AnonymousSourceRule, c.Location));
-            }
+            //foreach (var c in candidates.Where(c => c.IsAnonymous))
+            //{
+            //    spc.ReportDiagnostic(Diagnostic.Create(AnonymousSourceRule, c.Location));
+            //}
 
-            if(options.DotnetVersion >= 10 && candidates.Length > 0)
+            if (options.DotnetVersion >= 10 && candidates.Length > 0)
             {
-                spc.AddSource("FusionMapperInterceptors.g.cs", SourceText.From(InterceptorGenerator.Execute(candidates.Where(c => !c.IsAnonymous)), Encoding.UTF8));
+                spc.AddSource("FusionMapperInterceptors.g.cs", SourceText.From(InterceptorGenerator.Execute(candidates), Encoding.UTF8));
             }
         });
     }
@@ -84,7 +106,7 @@ public sealed class FusionMapperInterceptorGenerator : IIncrementalGenerator
             }
         };
 
-    private static Candidate? Transform(GeneratorSyntaxContext ctx, CancellationToken ct)
+    private static RawCandidate? Transform(GeneratorSyntaxContext ctx, CancellationToken ct)
     {
         if (ctx.Node is InvocationExpressionSyntax { Expression: MemberAccessExpressionSyntax { Name.Identifier.Value: "To" } } invocation
             && ctx.SemanticModel.GetOperation(invocation, ct) is IInvocationOperation targetOperation
@@ -135,16 +157,15 @@ public sealed class FusionMapperInterceptorGenerator : IIncrementalGenerator
             if (IsUnsupported(sourceType) || IsUnsupported(targetType))
                 return null;
 
-            if (IsInsideExpressionTree(ctx.SemanticModel, invocation, ct))
-                return null;
-
             return new(
                 ctx.Node.GetLocation(),
                 location,
                 kind,
+                sourceType,
+                targetType,
                 TypeModel.Create(sourceType),
                 TypeModel.Create(targetType),
-                sourceType.IsAnonymousType);
+                IsInsideExpressionTree(ctx.SemanticModel, invocation, ct));
         }
         return null;
     }
@@ -221,3 +242,4 @@ public sealed class FusionMapperInterceptorGenerator : IIncrementalGenerator
         } && cf.ToDisplayString() == "System.Linq.IQueryable<T>";
 
 }
+

@@ -1,9 +1,14 @@
-﻿using System.Linq.Expressions;
+﻿using System.Collections.Concurrent;
+using System.Linq.Expressions;
 
 namespace FusionMapper;
 
-internal sealed class ExpressionRewriter : ExpressionVisitor
+public sealed class ExpressionRewriter : ExpressionVisitor
 {
+    static readonly ExpressionRewriter instance = new();
+    static readonly ConcurrentDictionary<(Type Source, Type Target), LambdaExpression> cache = [];
+    private ExpressionRewriter() { }
+
     protected override Expression VisitMethodCall(MethodCallExpression node) => node switch
     {
         _ when IsFusionSourceTo(node) => RewriteSourceTo(node),
@@ -65,7 +70,7 @@ internal sealed class ExpressionRewriter : ExpressionVisitor
 
     private Expression InlineProjection(Expression sourceExpression, Type sourceType, Type targetType)
     {
-        var lambda = MappingBuilder.BuildCreationLambda(sourceType, targetType);
+        var lambda =  cache.GetOrAdd((sourceType, targetType), key => MappingBuilder.BuildCreationLambda(key.Source, key.Target));
         var parameter = lambda.Parameters[0];
 
         if (parameter.Type != sourceExpression.Type &&
@@ -90,7 +95,7 @@ internal sealed class ExpressionRewriter : ExpressionVisitor
         Type sourceType,
         Type targetType)
     {
-        var lambda = FusionMapper.State.GetCreationLambda(sourceType, targetType);
+        var lambda = cache.GetOrAdd((sourceType, targetType), key => MappingBuilder.BuildCreationLambda(key.Source, key.Target)); ;
         var expectedQueryableType = typeof(IQueryable<>).MakeGenericType(sourceType);
 
         if (!expectedQueryableType.IsAssignableFrom(queryExpression.Type))
@@ -147,6 +152,25 @@ internal sealed class ExpressionRewriter : ExpressionVisitor
 
     private static string GetName(Type type) =>
         type.FullName ?? type.Name;
+
+    public static IQueryable<TTarget> Rewrite<TTarget>(IQueryable<TTarget> query)
+    {
+        ArgumentNullException.ThrowIfNull(query);
+
+        if (instance.Visit(query.Expression) is not { } newExpression)
+        {
+            return query;
+        }
+
+        if (!typeof(IQueryable<TTarget>).IsAssignableFrom(newExpression.Type))
+        {
+            throw new MappingException(
+                $"Expression rewriting produced an expression of type '{newExpression.Type.FullName}' " +
+                $"which is not assignable to '{typeof(IQueryable<TTarget>).FullName}'.");
+        }
+
+        return query.Provider.CreateQuery<TTarget>(newExpression);
+    }
 
     private sealed class ParameterReplacer(ParameterExpression parameter, Expression replacement) : ExpressionVisitor
     {

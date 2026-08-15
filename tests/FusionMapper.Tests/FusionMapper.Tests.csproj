@@ -1,36 +1,37 @@
 <Project Sdk="Microsoft.NET.Sdk">
 
-  <PropertyGroup>
-    <ImplicitUsings>enable</ImplicitUsings>
-    <Nullable>enable</Nullable>
-    <OutputType>Exe</OutputType>
-    <TargetFramework>net10.0</TargetFramework>
-	<LangVersion>latest</LangVersion>
-	  <EmitCompilerGeneratedFiles>true</EmitCompilerGeneratedFiles>
-  </PropertyGroup>
+	<PropertyGroup>
+		<ImplicitUsings>enable</ImplicitUsings>
+		<Nullable>enable</Nullable>
+		<OutputType>Exe</OutputType>
+		<TargetFramework>net10.0</TargetFramework>
+		<LangVersion>latest</LangVersion>
+		<EmitCompilerGeneratedFiles>true</EmitCompilerGeneratedFiles>
+		<EnableFusionMapperInterceptor>false</EnableFusionMapperInterceptor>
+	</PropertyGroup>
 
-  <ItemGroup>
-    <PackageReference Include="TUnit" Version="1.*" />
-  </ItemGroup>
+	<ItemGroup>
+		<PackageReference Include="TUnit" Version="1.*" />
+	</ItemGroup>
 
-  <ItemGroup>
-    <ProjectReference Include="..\..\src\FusionMapper\FusionMapper.csproj" />
-  </ItemGroup>
+	<ItemGroup>
+		<ProjectReference Include="..\..\src\FusionMapper\FusionMapper.csproj" />
+	</ItemGroup>
 
-    <PropertyGroup>
-	    <!-- Для preview-режима interceptors, если твой SDK это еще требует -->
-    <InterceptorsPreviewNamespaces>$(InterceptorsPreviewNamespaces);FusionMapper.Interceptors</InterceptorsPreviewNamespaces>
-    </PropertyGroup>
+	<PropertyGroup>
+		<!-- Для preview-режима interceptors, если твой SDK это еще требует -->
+		<InterceptorsPreviewNamespaces>$(InterceptorsPreviewNamespaces);FusionMapper.Interceptors</InterceptorsPreviewNamespaces>
+	</PropertyGroup>
 
-    <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Debug|AnyCPU'">
-      <WarningsAsErrors>$(WarningsAsErrors);NU1605;Nullable</WarningsAsErrors>
-    </PropertyGroup>
+	<PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Debug|AnyCPU'">
+		<WarningsAsErrors>$(WarningsAsErrors);NU1605;Nullable</WarningsAsErrors>
+	</PropertyGroup>
 
-    <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Release|AnyCPU'">
-      <WarningsAsErrors>$(WarningsAsErrors);NU1605;Nullable</WarningsAsErrors>
-    </PropertyGroup>
+	<PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Release|AnyCPU'">
+		<WarningsAsErrors>$(WarningsAsErrors);NU1605;Nullable</WarningsAsErrors>
+	</PropertyGroup>
 
-    <ItemGroup>
-	    <ProjectReference Include="..\..\src\FusionMapper.SourceGeneration\FusionMapper.SourceGeneration.csproj" OutputItemType="Analyzer" ReferenceOutputAssembly="false" />
-    </ItemGroup>
+	<ItemGroup>
+		<ProjectReference Include="..\..\src\FusionMapper.SourceGenerator\FusionMapper.SourceGenerator.csproj" OutputItemType="Analyzer" ReferenceOutputAssembly="false" />
+	</ItemGroup>
 </Project>
