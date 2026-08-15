@@ -40,22 +40,12 @@ public class FusionMapper<TSource, TTarget>
 
     public static TTarget Map(TSource source, TTarget target)
     {
-        // 1) source == null && target == null -> return null/default
-        // 2) source == null && target != null -> leave target as is
         if (source is null)
         {
             return target;
         }
 
-        // 3) target не существует -> создаём новый объект
-        if (target is null)
-        {
-            return creator.Value(source);
-        }
-
-        // 4) target существует -> заполняем существующий объект        
-        assigner.Value(source, target);
-        return target;
+        return assigner.Value(source, target);
     }
 
     public static IQueryable<TTarget> Project(IQueryable<TSource> source)
@@ -66,7 +56,7 @@ public class FusionMapper<TSource, TTarget>
     }
 
     private static readonly Lazy<Func<TSource, TTarget>> creator = new(() => (Func<TSource, TTarget>)MappingBuilder.BuildCreationLambda(typeof(TSource), typeof(TTarget)).Compile(), true);
-    private static readonly Lazy<Action<TSource, TTarget>> assigner = new(() => (Action<TSource, TTarget>)MappingBuilder.BuildAssignmentLambda(typeof(TSource), typeof(TTarget)).Compile(), true);
+    private static readonly Lazy<Func<TSource, TTarget, TTarget>> assigner = new(() => (Func<TSource, TTarget, TTarget>)MappingBuilder.BuildAssignmentFuncLambda(typeof(TSource), typeof(TTarget)).Compile(), true);
     private static readonly Lazy<Expression<Func<TSource, TTarget>>> projector = new(() => (Expression<Func<TSource, TTarget>>)MappingBuilder.BuildCreationLambda(typeof(TSource), typeof(TTarget)), true);
 }
 

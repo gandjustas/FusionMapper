@@ -28,7 +28,8 @@ static class MappingBuilder
             throw new MappingException($"Can't map {sourceParam.Type} to {targetType}.");
         }
     }
-    public static LambdaExpression BuildAssignmentLambda(Type sourceType, Type targetType)
+
+    public static LambdaExpression BuildAssignmentFuncLambda(Type sourceType, Type targetType)
     {
         var sourceParam = Expression.Parameter(sourceType, "source");
         var targetParam = Expression.Parameter(targetType, "target");
@@ -36,185 +37,423 @@ static class MappingBuilder
         MappingPath path = new();
         using var rootGuard = path.Push(targetType, sourceType);
 
-        var body = BuildNonNullAssignmentBody(
-            sourceParam,
-            targetParam,
-            path);
-
-        if (body.Expressions.Count == 0)
+        if (TryBuildMapExpression(
+                sourceParam,
+                NullabilityState.Unknown,
+                targetParam,
+                NullabilityState.Unknown,
+                path,
+                assignTarget: true,
+                requireExistingMapping: true) is not { } mapped)
         {
             throw new MappingException(
-                $"Nothing were mapped from '{sourceType.FullName}' to '{targetType.FullName}'.");
+                $"Can't map '{sourceType.FullName}' to '{targetType.FullName}'.");
         }
 
-        // Явно создаём Action<TSource, TTarget>, чтобы избежать проблем с кастом LambdaExpression.
-        var delegateType = typeof(Action<,>).MakeGenericType(sourceType, targetType);
-        return Expression.Lambda(delegateType, body, sourceParam, targetParam);
+        var delegateType = typeof(Func<,,>).MakeGenericType(sourceType, targetType, targetType);
 
+        return Expression.Lambda(
+            delegateType,
+            mapped,
+            sourceParam,
+            targetParam);
     }
 
-    public static IEnumerable<Expression> BuildAssignmentBody(
+    private static BlockExpression? TryBuildMapExpression(
+        Expression source,
+        NullabilityState sourceNullability,
+        Expression target,
+        NullabilityState targetNullability,
+        MappingPath path,
+        bool assignTarget,
+        bool requireExistingMapping)
+    {
+        var sourceVar = Expression.Variable(source.Type, "sourceValue");
+        var targetVar = Expression.Variable(target.Type, "targetValue");
+        var resultVar = Expression.Variable(target.Type, "result");
+
+        var mappedNonNullSource = TryBuildMapFromNonNullSource(
+            sourceVar,
+            targetVar,
+            targetNullability,
+            path,
+            assignTarget,
+            requireExistingMapping);
+
+        if (mappedNonNullSource is null)
+        {
+            return null;
+        }
+
+        List<Expression> body =
+        [
+            Expression.Assign(sourceVar, source),
+        Expression.Assign(targetVar, target),
+        Expression.Assign(resultVar, targetVar)
+        ];
+
+        var needSourceNullCheck =
+            sourceNullability != NullabilityState.NotNull ||
+            CanBeNull(source.Type);
+
+        if (needSourceNullCheck)
+        {
+            body.Add(Expression.IfThen(
+                Expression.NotEqual(sourceVar, Expression.Constant(null, source.Type)),
+                Expression.Assign(resultVar, mappedNonNullSource)));
+        }
+        else
+        {
+            body.Add(Expression.Assign(resultVar, mappedNonNullSource));
+        }
+
+        body.Add(resultVar);
+
+        return Expression.Block(
+            target.Type,
+            [sourceVar, targetVar, resultVar],
+            body);
+    }
+
+
+    private static Expression? TryBuildMapFromNonNullSource(
+        Expression source,
+        Expression target,
+        NullabilityState targetNullability,
+        MappingPath path,
+        bool assignTarget,
+        bool requireExistingMapping)
+    {
+        var targetType = target.Type;
+
+        var existingMapping = TryBuildExistingNonNullMapping(
+            source,
+            NullabilityState.NotNull,
+            target,
+            targetNullability,
+            path: path,
+            assignTarget: assignTarget);
+
+        Expression? createNew = assignTarget
+            ? TryBuildCreationExpression(
+                source,
+                targetType,
+                targetNullability,
+                path)
+            : null;
+
+        if (existingMapping is null && createNew is null)
+        {
+            return requireExistingMapping
+                ? ThrowNothingMapped(source.Type, targetType)
+                : null;
+        }
+
+        if (CanBeNull(targetType) && targetNullability != NullabilityState.NotNull)
+        {
+            Expression nullBranch = createNew is not null
+                ? EnsureType(createNew, targetType)!
+                : requireExistingMapping
+                    ? ThrowNothingMapped(source.Type, targetType)
+                    : Expression.Default(targetType);
+
+            Expression nonNullBranch = existingMapping is not null
+                ? EnsureType(existingMapping, targetType)!
+                : requireExistingMapping
+                    ? ThrowNothingMapped(source.Type, targetType)
+                    : target;
+
+            return Expression.Condition(
+                Expression.Equal(target, Expression.Constant(null, targetType)),
+                nullBranch,
+                nonNullBranch,
+                targetType);
+        }
+
+        if (existingMapping is not null)
+        {
+            return EnsureType(existingMapping, targetType);
+        }
+
+        return requireExistingMapping
+            ? ThrowNothingMapped(source.Type, targetType)
+            : null;
+    }
+
+
+    private static BlockExpression? TryBuildMutationExpression(
         Expression source,
         NullabilityState sourceNullability,
         Expression target,
         NullabilityState targetNullability,
         MappingPath path)
     {
-        var sourceType = source.Type;
-        var targetType = target.Type;
+        var sourceVar = Expression.Variable(source.Type, "sourceValue");
+        var targetVar = Expression.Variable(target.Type, "targetValue");
 
-        var returnLabel = Expression.Label(targetType, "MapToExistingReturn");
+        var mutation = TryBuildExistingNonNullMapping(
+            sourceVar,
+            sourceNullability,
+            targetVar,
+            targetNullability,
+            path,
+            assignTarget: false);
 
-        // source == null -> вернуть target как есть
-        if (sourceNullability != NullabilityState.NotNull || CanBeNull(sourceType))
+        if (mutation is null)
         {
-            yield return Expression.IfThen(
-                    Expression.Equal(source, Expression.Constant(null, sourceType)),
-                    Expression.Return(returnLabel));
+            return null;
         }
 
-        // target == null -> создать новый через creation-маппинг
-        if (targetNullability != NullabilityState.NotNull || CanBeNull(targetType))
-        {
-            var createNew = BuildNonNullMappingBody(source, NullabilityState.NotNull, targetType, path);
+        var voidMutation = ToVoid(mutation);
 
-            yield return Expression.IfThen(
-                    Expression.Equal(target, Expression.Constant(null, targetType)),
-                    Expression.Return(returnLabel));
+        List<Expression> body =
+        [
+            Expression.Assign(sourceVar, source),
+        Expression.Assign(targetVar, target)
+        ];
+
+        var needSourceNullCheck = CanBeNull(source.Type);
+        var needTargetNullCheck = CanBeNull(target.Type);
+
+        if (needSourceNullCheck && needTargetNullCheck)
+        {
+            body.Add(Expression.IfThen(
+                Expression.AndAlso(
+                    Expression.NotEqual(sourceVar, Expression.Constant(null, source.Type)),
+                    Expression.NotEqual(targetVar, Expression.Constant(null, target.Type))),
+                voidMutation));
+        }
+        else if (needSourceNullCheck)
+        {
+            body.Add(Expression.IfThen(
+                Expression.NotEqual(sourceVar, Expression.Constant(null, source.Type)),
+                voidMutation));
+        }
+        else if (needTargetNullCheck)
+        {
+            body.Add(Expression.IfThen(
+                Expression.NotEqual(targetVar, Expression.Constant(null, target.Type)),
+                voidMutation));
+        }
+        else
+        {
+            body.Add(voidMutation);
         }
 
-        var body = BuildNonNullAssignmentBody(source, target, path);
-        if (body.Expressions.Count == 0)
-        {
-            throw new MappingException(
-                $"Nothing were mapped from '{sourceType.FullName}' to '{targetType.FullName}'.");
-        }
-        yield return Expression.Label(returnLabel);
+        return Expression.Block(
+            typeof(void),
+            [sourceVar, targetVar],
+            body);
     }
 
-    public static BlockExpression BuildNonNullAssignmentBody(
+    private static Expression? TryBuildExistingNonNullMapping(
         Expression source,
-        Expression target,
-        MappingPath path)
-    {
-        var sourceType = source.Type;
-        var targetType = target.Type;
-
-        // Корневая пара нужна, чтобы recursion detection видел полный путь.
-
-        var writableProperties = targetType
-            .GetProperties(BindingFlags.Public | BindingFlags.Instance)
-            .Where(p => p.GetIndexParameters().Length == 0)
-            .Where(p => p.SetMethod is { IsPublic: true })
-            .Where(p => !IsInitOnly(p))
-            .Cast<MemberInfo>();
-
-        var writableFields = targetType
-            .GetFields(BindingFlags.Public | BindingFlags.Instance)
-            .Where(f => !f.IsInitOnly && !f.IsLiteral)
-            .Cast<MemberInfo>();
-
-        var assignExpressions = writableProperties
-            .Concat(writableFields)
-            .Select(member =>
-            {
-                var memberType = GetMemberType(member);
-                var targetNullability = GetMemberNullability(member).WriteState;
-
-                foreach (var (accessExpr, sourceNullability)
-                    in GetSourceMemberAccess(source, NullabilityState.NotNull, member.Name))
-                {
-                    using var guard = path.Push(memberType, accessExpr.Type);
-
-                    if (BuildCreationBody(
-                            accessExpr,
-                            sourceNullability,
-                            memberType,
-                            targetNullability,
-                            path) is not { } mappedExpr)
-                    {
-                        continue;
-                    }
-
-                    // BuildMappingBody может вернуть expression с типом, который assignable target'у,
-                    // но не совпадает с ним. Для стабильных expression tree лучше приводить явно.
-                    if (mappedExpr.Type != memberType)
-                    {
-                        if (!memberType.IsAssignableFrom(mappedExpr.Type))
-                            continue;
-
-                        mappedExpr = Expression.Convert(mappedExpr, memberType);
-                    }
-
-                    return (Expression)Expression.Assign(
-                        Expression.MakeMemberAccess(target, member),
-                        mappedExpr);
-                }
-
-                return null;
-            });
-
-        var readOnlyProperties = targetType
-            .GetProperties(BindingFlags.Public | BindingFlags.Instance)
-            .Where(p =>
-                p.CanRead &&
-                !p.CanWrite &&
-                p.GetIndexParameters().Length == 0)
-            .Cast<MemberInfo>();
-
-        var readOnlyFields = targetType
-            .GetFields(BindingFlags.Public | BindingFlags.Instance)
-            .Where(f => f.IsInitOnly && !f.IsLiteral)
-            .Cast<MemberInfo>();
-
-        var fillCollectionExpressions = readOnlyProperties
-            .Concat(readOnlyFields)
-            .Select(member =>
-            {
-                var targetMemberType = GetMemberType(member);
-
-                if (!IsCollectionType(targetMemberType, out _))
-                    return null;
-
-                foreach (var (accessExpr, nullability)
-                    in GetSourceMemberAccess(source, NullabilityState.NotNull, member.Name))
-                {
-                    // Если кандидат не является коллекцией, пробуем следующего кандидата.
-                    if (!IsCollectionType(accessExpr.Type, out _))
-                        continue;
-
-                    using var guard = path.Push(targetMemberType, accessExpr.Type);
-
-                    if (BuildReadOnlyCollectionMutation(
-                            accessExpr,
-                            nullability,
-                            target,
-                            member,
-                            targetMemberType,
-                            path) is { } mutation)
-                    {
-                        return (Expression)mutation;
-                    }
-                }
-
-                return null;
-            });
-
-        var bodyExpressions = assignExpressions
-            .Concat(fillCollectionExpressions)
-            .OfType<Expression>();
-
-        return Expression.Block(typeof(void), bodyExpressions);
-    }
-
-
-    private static BlockExpression? BuildReadOnlyCollectionMutation(
-        Expression sourceAccess,
         NullabilityState sourceNullability,
         Expression target,
+        NullabilityState targetNullability,
+        MappingPath path,
+        bool assignTarget)
+    {
+        var targetType = target.Type;
+
+        if (targetType.IsPointer || targetType.IsFunctionPointer)
+        {
+            return null;
+        }
+
+        // Коллекции: пытаемся очистить и заполнить существующую.
+        if (IsCollectionType(targetType, out _) && IsCollectionType(source.Type, out _))
+        {
+            if (TryBuildCollectionMutation(source, target, targetType, path) is { } mutation)
+            {
+                return Expression.Block(
+                    targetType,
+                    mutation,
+                    target);
+            }
+
+            // Массивы и коллекции без Clear/Add/AddRange пропускаем.
+            return null;
+        }
+
+        // Обычные объекты: пытаемся рекурсивно заполнить существующий объект.
+        var statements = TryBuildObjectMutationStatements(source, sourceNullability, target, targetNullability, path);
+
+        if (statements.Count > 0)
+        {
+            return Expression.Block(
+                targetType,
+                statements.Append(target));
+        }
+
+        if (!assignTarget)
+        {
+            return null;
+        }
+
+        return TryBuildAssignmentConversion(source, targetType);
+    }
+
+    private static Expression? TryBuildAssignmentConversion(Expression source, Type targetType)
+    {
+        var sourceType = source.Type;
+
+        // Прямое присвоение.
+        if (targetType.IsAssignableFrom(sourceType))
+        {
+            return EnsureType(source, targetType);
+        }
+
+        // Nullable unwrap / Nullable wrap.
+        var sourceUnderlying = Nullable.GetUnderlyingType(sourceType);
+        var targetUnderlying = Nullable.GetUnderlyingType(targetType);
+
+        if (sourceUnderlying is not null || targetUnderlying is not null)
+        {
+            var nonNullSource = sourceUnderlying is null
+                ? source
+                : Expression.Property(source, sourceType.GetProperty("Value")!);
+
+            var nonNullTarget = targetUnderlying ?? targetType;
+
+            if (TryBuildAssignmentConversion(nonNullSource, nonNullTarget) is { } converted)
+            {
+                return EnsureType(converted, targetType);
+            }
+        }
+
+        // enum -> string
+        if (sourceType.IsEnum && targetType == typeof(string))
+        {
+            return Expression.Call(
+                Expression.Convert(source, typeof(object)),
+                ObjectToStringMethod);
+        }
+
+        // string -> enum
+        if (sourceType == typeof(string) && targetType.IsEnum)
+        {
+            return BuildStringToEnum(source, targetType);
+        }
+
+        // Остальные стандартные конверсии: int -> long, double -> decimal и т.п.
+        return TryConvert(source, targetType);
+    }
+
+    private static IReadOnlyList<Expression> TryBuildObjectMutationStatements(
+    Expression source,
+    NullabilityState sourceNullability,
+    Expression target,
+    NullabilityState targetNullability,
+    MappingPath path)
+    {
+        var targetType = target.Type;
+
+        if (targetType.IsPointer ||
+            targetType.IsFunctionPointer ||
+            targetType.IsPrimitive ||
+            targetType.IsEnum ||
+            targetType == typeof(string))
+        {
+            return [];
+        }
+
+        List<Expression> expressions = [];
+
+        foreach (var member in GetWritableMembers(targetType))
+        {
+            if (TryBuildWritableMemberStatement(member, source, sourceNullability, target, targetNullability, path) is { } statement)
+            {
+                expressions.Add(statement);
+            }
+        }
+
+        foreach (var member in GetReadableNonWritableMembers(targetType))
+        {
+            if (TryBuildReadOnlyMemberMutation(member, source, sourceNullability, target, targetNullability, path) is { } statement)
+            {
+                expressions.Add(statement);
+            }
+        }
+
+        return expressions;
+    }
+
+    private static BinaryExpression? TryBuildWritableMemberStatement(
+    MemberInfo member,
+    Expression sourceOwner,
+    NullabilityState sourceNullability,
+    Expression targetOwner,
+    NullabilityState targetNullability,
+    MappingPath path)
+    {
+        var memberType = GetMemberType(member);
+        var targetAccess = Expression.MakeMemberAccess(targetOwner, member);
+
+        foreach (var (sourceAccess, _)
+            in GetSourceMemberAccess(sourceOwner, NullabilityState.NotNull, member.Name))
+        {
+            using var guard = path.Push(memberType, sourceAccess.Type);
+
+            if (TryBuildMapExpression(
+                    sourceAccess,
+                    sourceNullability,
+                    targetAccess,
+                    targetNullability,
+                    path,
+                    assignTarget: true,
+                    requireExistingMapping: false) is not { } mapped)
+            {
+                continue;
+            }
+
+            return Expression.Assign(targetAccess, mapped);
+        }
+
+        return null;
+    }
+
+    private static BlockExpression? TryBuildReadOnlyMemberMutation(
         MemberInfo member,
-        Type targetCollectionType,
+        Expression sourceOwner,
+        NullabilityState sourceNullability,
+        Expression targetOwner,
+        NullabilityState targetNullability,
         MappingPath path)
+    {
+        var memberType = GetMemberType(member);
+
+        if (memberType.IsValueType)
+        {
+            return null;
+        }
+
+        var targetAccess = Expression.MakeMemberAccess(targetOwner, member);
+
+        foreach (var (sourceAccess, _)
+            in GetSourceMemberAccess(sourceOwner, NullabilityState.NotNull, member.Name))
+        {
+            using var guard = path.Push(memberType, sourceAccess.Type);
+
+            if (TryBuildMutationExpression(
+                    sourceAccess,
+                    sourceNullability,
+                    targetAccess,
+                    targetNullability,
+                    path: path) is { } mutation)
+            {
+                return mutation;
+            }
+        }
+
+        return null;
+    }
+
+    private static BlockExpression? TryBuildCollectionMutation(
+    Expression source,
+    Expression target,
+    Type targetCollectionType,
+    MappingPath path)
     {
         if (!IsCollectionType(targetCollectionType, out var targetElementType) ||
             targetElementType is null)
@@ -222,75 +461,39 @@ static class MappingBuilder
             return null;
         }
 
-        if (!IsCollectionType(sourceAccess.Type, out var sourceElementType) ||
+        if (!IsCollectionType(source.Type, out var sourceElementType) ||
             sourceElementType is null)
         {
             return null;
         }
 
+        // Массивы не поддерживаем: нельзя безопасно очистить и заполнить существующий массив
+        // без информации о длине и без замены ссылки.
         if (targetCollectionType.IsArray)
         {
-            throw new MappingException(
-                $"Cannot update read-only array member '{member.Name}'. " +
-                $"Source type: '{sourceAccess.Type.FullName}'. " +
-                $"Target member type: '{targetCollectionType.FullName}'.");
+            return null;
         }
-
 
         var clearMethod = FindCollectionClearMethod(targetCollectionType);
         var addMethod = FindCollectionAddMethod(targetCollectionType, targetElementType);
         var addRangeMethod = FindCollectionAddRangeMethod(targetCollectionType, targetElementType);
 
-
-        if (clearMethod is null || (addRangeMethod is null && addMethod is null))
+        if (clearMethod is null || (addMethod is null && addRangeMethod is null))
         {
-            throw new MappingException(
-                $"Read-only collection member '{member.Name}' cannot be mutated. " +
-                $"Target member type: '{targetCollectionType.FullName}'. " +
-                "The collection must expose a public Clear method and either AddRange or Add.");
+            return null;
         }
-
-        var mappedEnumerableType = typeof(IEnumerable<>).MakeGenericType(targetElementType);
-
-        var memberAccess = Expression.MakeMemberAccess(target, member);
-
-        var existingVar = Expression.Variable(targetCollectionType, $"{member.Name}_existing");
-        var sourceVar = Expression.Variable(sourceAccess.Type, $"{member.Name}_source");
-        var mappedListVar = Expression.Variable(mappedEnumerableType, $"{member.Name}_mapped");
-
-        List<Expression> body =
-        [
-            Expression.Assign(existingVar, memberAccess)
-        ];
-
-        if (CanBeNull(targetCollectionType))
-        {
-            body.Add(Expression.IfThen(
-                Expression.Equal(existingVar, Expression.Constant(null, targetCollectionType)),
-                Expression.Throw(
-                    Expression.New(
-                        typeof(InvalidOperationException).GetConstructor([typeof(string)])!,
-                        Expression.Constant(
-                            $"Read-only collection member '{member.Name}' is null and cannot be mutated. " +
-                            $"Target member type: '{targetCollectionType.FullName}'.")),
-                    typeof(void))));
-        }
-
-        body.Add(Expression.Assign(sourceVar, sourceAccess));
 
         var itemParam = Expression.Parameter(sourceElementType, "item");
 
         Expression mappedItem;
 
-        // Пушим пару элементов, чтобы корректно детектить рекурсию на уровне element mapping.
         using (path.Push(targetElementType, sourceElementType))
         {
-            if (BuildCreationBody(
+            if (TryBuildCreationExpression(
                     itemParam,
-                    sourceNullability: NullabilityState.NotNull,
-                    targetType: targetElementType,
-                    targetNullability: NullabilityState.NotNull,
-                    path: path) is not { } itemBody)
+                    targetElementType,
+                    NullabilityState.Unknown,
+                    path) is not { } itemBody)
             {
                 return null;
             }
@@ -298,58 +501,50 @@ static class MappingBuilder
             mappedItem = itemBody;
         }
 
-        // Select<TSource, TResult> требует Func<TSource, TResult>.
-        // Если body имеет assignable, но другой тип, приводим к targetElementType.
-        if (mappedItem.Type != targetElementType)
+        if (EnsureType(mappedItem, targetElementType) is not { } typedMappedItem)
         {
-            if (!targetElementType.IsAssignableFrom(mappedItem.Type))
-                return null;
-
-            mappedItem = Expression.Convert(mappedItem, targetElementType);
+            return null;
         }
 
         var lambdaType = typeof(Func<,>).MakeGenericType(sourceElementType, targetElementType);
-        var lambda = Expression.Lambda(lambdaType, mappedItem, itemParam);
+
+        var lambda = Expression.Lambda(
+            lambdaType,
+            typedMappedItem,
+            itemParam);
 
         var selectCall = Expression.Call(
             typeof(Enumerable),
             nameof(Enumerable.Select),
             [sourceElementType, targetElementType],
-            sourceVar,
+            source,
             lambda);
 
+        // Обязательно материализуем результат до Clear,
+        // чтобы не потерять данные, если source и target — одна и та же коллекция.
+        var toListCall = Expression.Call(
+            typeof(Enumerable),
+            nameof(Enumerable.ToList),
+            [targetElementType],
+            selectCall);
 
+        var mappedListType = typeof(List<>).MakeGenericType(targetElementType);
+        var mappedListVar = Expression.Variable(mappedListType, "mappedItems");
 
-        Expression mappedListValue;
-
-        if (CanBeNull(sourceVar.Type) &&
-            sourceNullability != NullabilityState.NotNull)
-        {
-            mappedListValue = Expression.Condition(
-                Expression.Equal(sourceVar, Expression.Constant(null, sourceVar.Type)),
-                Expression.Call(
-                typeof(Enumerable),
-                nameof(Enumerable.Empty),
-                [targetElementType]),
-                selectCall,
-                mappedEnumerableType);
-        }
-        else
-        {
-            mappedListValue = selectCall;
-        }
-
-        body.Add(Expression.Assign(mappedListVar, mappedListValue));
-        body.Add(Expression.Call(existingVar, clearMethod));
+        List<Expression> body =
+        [
+            Expression.Assign(mappedListVar, toListCall),
+        Expression.Call(target, clearMethod)
+        ];
 
         if (addRangeMethod is not null)
         {
-            body.Add(Expression.Call(existingVar, addRangeMethod, mappedListVar));
+            body.Add(Expression.Call(target, addRangeMethod, mappedListVar));
         }
         else
         {
             body.Add(BuildAddFromEnumerableLoop(
-                existingVar,
+                target,
                 addMethod!,
                 mappedListVar,
                 targetElementType));
@@ -357,8 +552,35 @@ static class MappingBuilder
 
         return Expression.Block(
             typeof(void),
-            [existingVar, sourceVar, mappedListVar],
+            [mappedListVar],
             body);
+    }
+    private static Expression? TryBuildCreationExpression(
+    Expression source,
+    Type targetType,
+    NullabilityState targetNullability,
+    MappingPath path)
+    {
+        try
+        {
+            var created = BuildCreationBody(
+                source,
+                NullabilityState.NotNull,
+                targetType,
+                targetNullability,
+                path);
+
+            if (created is null)
+            {
+                return null;
+            }
+
+            return EnsureType(created, targetType);
+        }
+        catch (Exception ex) when (ex is MappingException or InvalidOperationException or ArgumentException)
+        {
+            return null;
+        }
     }
 
     private static BlockExpression BuildAddFromEnumerableLoop(
@@ -1090,6 +1312,85 @@ static class MappingBuilder
 
         return false;
     }
+    private static IEnumerable<MemberInfo> GetWritableMembers(Type type)
+    {
+        var properties = type
+            .GetProperties(BindingFlags.Public | BindingFlags.Instance)
+            .Where(p => p.GetIndexParameters().Length == 0)
+            .Where(p => p.SetMethod is { IsPublic: true })
+            .Where(p => !IsInitOnly(p));
+
+        var fields = type
+            .GetFields(BindingFlags.Public | BindingFlags.Instance)
+            .Where(f => !f.IsInitOnly && !f.IsLiteral);
+
+        return properties.Cast<MemberInfo>().Concat(fields);
+    }
+
+    private static IEnumerable<MemberInfo> GetReadableNonWritableMembers(Type type)
+    {
+        var properties = type
+            .GetProperties(BindingFlags.Public | BindingFlags.Instance)
+            .Where(p =>
+                p.CanRead &&
+                p.GetGetMethod() is not null &&
+                p.GetIndexParameters().Length == 0)
+            .Where(p =>
+                p.SetMethod is null ||
+                !p.SetMethod.IsPublic ||
+                IsInitOnly(p));
+
+        var fields = type
+            .GetFields(BindingFlags.Public | BindingFlags.Instance)
+            .Where(f => f.IsInitOnly && !f.IsLiteral);
+
+        return properties.Cast<MemberInfo>().Concat(fields);
+    }
+
+    private static Expression? EnsureType(Expression expression, Type type)
+    {
+        if (expression.Type == type)
+        {
+            return expression;
+        }
+
+        if (type.IsAssignableFrom(expression.Type))
+        {
+            return Expression.Convert(expression, type);
+        }
+
+        try
+        {
+            return Expression.Convert(expression, type);
+        }
+        catch (InvalidOperationException)
+        {
+            return null;
+        }
+    }
+
+    private static Expression ToVoid(Expression expression)
+    {
+        if (expression.Type == typeof(void))
+        {
+            return expression;
+        }
+
+        return Expression.Block(typeof(void), expression);
+    }
+
+    private static UnaryExpression ThrowNothingMapped(Type sourceType, Type targetType)
+    {
+        var message =
+            $"Nothing were mapped from '{sourceType.FullName}' to '{targetType.FullName}'.";
+
+        return Expression.Throw(
+            Expression.New(
+                typeof(MappingException).GetConstructor([typeof(string)])!,
+                Expression.Constant(message)),
+            targetType);
+    }
+
 
     private static bool IsInitOnly(PropertyInfo property)
     {

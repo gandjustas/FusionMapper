@@ -81,7 +81,7 @@ public class CriticalTests
 
     internal class ReadOnlyTarget
     {
-        public AddOnlyCollection<string> Items { get; } = new();
+        public AddOnlyCollection<string> Items { get; } = [];
     }
 
     [Test]

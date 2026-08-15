@@ -41,7 +41,7 @@ public class AdvancedFlatteningTests
     }
 
     [Test]
-    public async Task Map_Flattening_With_Null_Intermediate_And_Collection()
+    public async Task Map_Flattening_With_Empty_Collection()
     {
         var source = new Order(); // Customer is not null, but Addresses is empty
         source.Customer.Name = "Bob";

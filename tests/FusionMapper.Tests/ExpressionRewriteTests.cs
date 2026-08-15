@@ -18,7 +18,7 @@ public class ExpressionRewriteTests
             ExpressionHelper.ContainsMethodName(query.Expression, "Map")
         ).IsTrue();
 
-        var rewritten = source
+        var rewritten = query
             .Project()
             .To<SimpleTarget>();
 
@@ -52,7 +52,7 @@ public class ExpressionRewriteTests
             ExpressionHelper.ContainsMethodName(query.Expression, "Map")
         ).IsTrue();
 
-        var rewritten = filteredSource
+        var rewritten = query
             .Project()
             .To<SimpleTarget>();
 
@@ -118,7 +118,7 @@ public class ExpressionRewriteTests
             ExpressionHelper.ContainsMethodName(query.Expression, "Map")
         ).IsTrue();
 
-        var rewritten = source
+        var rewritten = query
             .Project()
             .To<SimpleTarget>();
 
@@ -150,7 +150,7 @@ public class ExpressionRewriteTests
 
         var originalExpression = query.Expression;
 
-        var rewritten = source
+        var rewritten = query
             .Project()
             .To<SimpleTarget>();
 

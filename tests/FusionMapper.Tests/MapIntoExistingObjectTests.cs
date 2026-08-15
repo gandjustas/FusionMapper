@@ -42,15 +42,18 @@ public class MapIntoExistingObjectTests
     [Test]
     public async Task Map_To_Existing_Object_With_Collection_Replaces_Items()
     {
-        var source = new OrderSource();
-        source.Items.Add(new ItemSource { Name = "A" });
-        source.Items.Add(new ItemSource { Name = "B" });
+        OrderSource source = new();
+        source.Items.Add(new (){ Name = "A" });
+        source.Items.Add(new() { Name = "B" });
 
-        var target = new OrderTarget();
-        target.Items.Add(new ItemTarget { Name = "Old" });
+        OrderTarget target = new();
+        target.Items.Add(new() { Name = "Old" });
+
+        var originalItems = target.Items;
 
         source.Map().To(target);
 
+        await Assert.That(ReferenceEquals(target.Items, originalItems)).IsTrue();
         await Assert.That(target.Items.Count).IsEqualTo(2);
         await Assert.That(target.Items[0].Name).IsEqualTo("A");
         await Assert.That(target.Items[1].Name).IsEqualTo("B");
