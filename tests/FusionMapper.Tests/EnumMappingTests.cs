@@ -4,22 +4,22 @@ namespace FusionMapper.Tests;
 public class EnumMappingTests
 {
     // Модели для тестов
-    private enum Color { Red, Green, Blue }
-    private enum Status { Active = 1, Inactive = 0 }
+    internal enum Color { Red, Green, Blue }
+    internal enum Status { Active = 1, Inactive = 0 }
 
-    private class SourceWithEnum
+    internal class SourceWithEnum
     {
         public Color Color { get; set; }
         public Status? Status { get; set; }
     }
 
-    private class TargetWithEnumInt
+    internal class TargetWithEnumInt
     {
         public int Color { get; set; }
         public int? Status { get; set; }
     }
 
-    private class TargetWithEnumString
+    internal class TargetWithEnumString
     {
         public string Color { get; set; } = string.Empty;
         public string? Status { get; set; }

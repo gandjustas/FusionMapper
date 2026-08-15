@@ -138,7 +138,7 @@ public class PrimitiveMappingTests
     public async Task Map_Null_String_To_String_Returns_Null()
     {
         string? source = null;
-        await Assert.That(source.Map().To<string>()).IsNull();
+        await Assert.That(source.Map().To<string?>()).IsNull();
     }
 
     [Test]
@@ -172,7 +172,7 @@ public class PrimitiveMappingTests
         Blue = 2
     }
 
-    private class NonNullableTarget
+    internal class NonNullableTarget
     {
         public int Value { get; set; }
     }

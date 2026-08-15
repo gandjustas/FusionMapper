@@ -4,8 +4,9 @@
     <ImplicitUsings>enable</ImplicitUsings>
     <Nullable>enable</Nullable>
     <OutputType>Exe</OutputType>
-    <TargetFramework>net8.0</TargetFramework>
+    <TargetFramework>net10.0</TargetFramework>
 	<LangVersion>latest</LangVersion>
+	  <EmitCompilerGeneratedFiles>true</EmitCompilerGeneratedFiles>
   </PropertyGroup>
 
   <ItemGroup>
@@ -16,4 +17,20 @@
     <ProjectReference Include="..\..\src\FusionMapper\FusionMapper.csproj" />
   </ItemGroup>
 
+    <PropertyGroup>
+	    <!-- Для preview-режима interceptors, если твой SDK это еще требует -->
+    <InterceptorsPreviewNamespaces>$(InterceptorsPreviewNamespaces);FusionMapper.Interceptors</InterceptorsPreviewNamespaces>
+    </PropertyGroup>
+
+    <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Debug|AnyCPU'">
+      <WarningsAsErrors>$(WarningsAsErrors);NU1605;Nullable</WarningsAsErrors>
+    </PropertyGroup>
+
+    <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Release|AnyCPU'">
+      <WarningsAsErrors>$(WarningsAsErrors);NU1605;Nullable</WarningsAsErrors>
+    </PropertyGroup>
+
+    <ItemGroup>
+	    <ProjectReference Include="..\..\src\FusionMapper.SourceGeneration\FusionMapper.SourceGeneration.csproj" OutputItemType="Analyzer" ReferenceOutputAssembly="false" />
+    </ItemGroup>
 </Project>

@@ -2,23 +2,23 @@
 
 public class AdvancedFlatteningTests
 {
-    private class Order
+    internal class Order
     {
         public Customer Customer { get; set; } = new();
     }
 
-    private class Customer
+    internal class Customer
     {
         public string Name { get; set; } = string.Empty;
         public List<Address> Addresses { get; set; } = [];
     }
 
-    private class Address
+    internal class Address
     {
         public string City { get; set; } = string.Empty;
     }
 
-    private class OrderDto
+    internal class OrderDto
     {
         public string CustomerName { get; set; } = string.Empty;
         public int CustomerAddressesCount { get; set; }

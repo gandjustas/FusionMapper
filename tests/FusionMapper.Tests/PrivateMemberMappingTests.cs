@@ -3,7 +3,7 @@ namespace FusionMapper.Tests;
 
 public class PrivateMemberMappingTests
 {
-    private class SourceWithPrivate
+    internal class SourceWithPrivate
     {
         public string PublicName { get; set; } = "Public";
         private string PrivateName { get; set; } = "Private";
@@ -11,7 +11,7 @@ public class PrivateMemberMappingTests
         internal string InternalName { get; set; } = "Internal";
     }
 
-    private class TargetWithPrivate
+    internal class TargetWithPrivate
     {
         public string PublicName { get; set; } = string.Empty;
         public string PrivateName { get; set; } = string.Empty;
@@ -38,12 +38,12 @@ public class PrivateMemberMappingTests
     }
 
     // Дополнительный тест: если у источника есть публичное поле (не свойство)
-    private class SourceWithPublicField
+    internal class SourceWithPublicField
     {
         public string Field = "FieldValue";
     }
 
-    private class TargetWithPublicField
+    internal class TargetWithPublicField
     {
         public string Field { get; set; } = string.Empty;
     }

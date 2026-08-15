@@ -83,9 +83,9 @@ public class MapIntoExistingObjectTests
         await Assert.That(target.Name).IsEqualTo("Old");
     }
 
-    private sealed class InitOnlyTarget
+    public sealed class InitOnlyTarget
     {
-        public string Name { get; init; }
+        public required string Name { get; init; }
         public int Value { get; set; }
     }
 }

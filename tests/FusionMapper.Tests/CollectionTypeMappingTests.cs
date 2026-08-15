@@ -4,12 +4,12 @@ namespace FusionMapper.Tests;
 
 public class CollectionTypeMappingTests
 {
-    private class Item
+    internal class Item
     {
         public string Value { get; set; } = string.Empty;
     }
 
-    private class ItemDto
+    internal class ItemDto
     {
         public string Value { get; set; } = string.Empty;
     }
@@ -75,12 +75,12 @@ public class CollectionTypeMappingTests
     }
 
     // Маппинг словаря (если поддерживается)
-    private class SourceWithDictionary
+    internal class SourceWithDictionary
     {
         public Dictionary<string, int> Values { get; set; } = [];
     }
 
-    private class TargetWithDictionary
+    internal class TargetWithDictionary
     {
         public Dictionary<string, int> Values { get; set; } = [];
     }
@@ -99,7 +99,7 @@ public class CollectionTypeMappingTests
     }
 
     // Маппинг словаря в список пар (если поддерживается)
-    private class TargetWithListOfPairs
+    internal class TargetWithListOfPairs
     {
         public List<KeyValuePair<string, int>> Values { get; set; } = [];
     }

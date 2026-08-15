@@ -2,14 +2,14 @@
 
 public class NullableMappingTests
 {
-    private class SourceWithNullable
+    internal class SourceWithNullable
     {
         public int? NullableInt { get; set; }
         public string? NullableString { get; set; }
         public DateTime? NullableDateTime { get; set; }
     }
 
-    private class TargetWithNonNullable
+    internal class TargetWithNonNullable
     {
         public int NullableInt { get; set; }
         public string NullableString { get; set; } = string.Empty;

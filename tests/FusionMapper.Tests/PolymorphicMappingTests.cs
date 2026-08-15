@@ -3,33 +3,33 @@
 public class PolymorphicMappingTests
 {
     // Базовые классы
-    private class Animal
+    internal class Animal
     {
         public string Name { get; set; } = string.Empty;
     }
 
-    private class Dog : Animal
+    internal class Dog : Animal
     {
         public string Breed { get; set; } = string.Empty;
     }
 
-    private class Cat : Animal
+    internal class Cat : Animal
     {
         public int Lives { get; set; }
     }
 
     // Целевые DTO
-    private class AnimalDto
+    internal class AnimalDto
     {
         public string Name { get; set; } = string.Empty;
     }
 
-    private class DogDto : AnimalDto
+    internal class DogDto : AnimalDto
     {
         public string Breed { get; set; } = string.Empty;
     }
 
-    private class CatDto : AnimalDto
+    internal class CatDto : AnimalDto
     {
         public int Lives { get; set; }
     }

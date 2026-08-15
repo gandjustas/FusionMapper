@@ -1,15 +1,16 @@
 ﻿using System.Collections;
+using System.Linq.Expressions;
 
 namespace FusionMapper.Tests;
 
 public class CriticalTests
 {
-    private class IntSource
+    internal class IntSource
     {
         public int Value { get; init; }
     }
 
-    private class ObjectTarget
+    internal class ObjectTarget
     {
         public object? Value { get; init; }
     }
@@ -27,17 +28,17 @@ public class CriticalTests
         await Assert.That(target.Value).IsEqualTo(42);
     }
 
-    private class ItemSource
+    internal class ItemSource
     {
         public string Name { get; init; } = string.Empty;
     }
 
-    private class OrderSource
+    internal class OrderSource
     {
         public List<ItemSource> Items { get; init; } = [];
     }
 
-    private class OrderTarget
+    internal class OrderTarget
     {
         public int ItemsCount { get; init; }
     }
@@ -59,7 +60,7 @@ public class CriticalTests
         await Assert.That(target.ItemsCount).IsEqualTo(2);
     }
 
-    private class AddOnlyCollection<T> : IEnumerable<T>
+    internal class AddOnlyCollection<T> : IEnumerable<T>
     {
         private readonly List<T> _items = [];
 
@@ -74,12 +75,12 @@ public class CriticalTests
         IEnumerator IEnumerable.GetEnumerator() => GetEnumerator();
     }
 
-    private class ReadOnlySource
+    internal class ReadOnlySource
     {
         public List<string> Items { get; init; } = [];
     }
 
-    private class ReadOnlyTarget
+    internal class ReadOnlyTarget
     {
         public AddOnlyCollection<string> Items { get; } = new();
     }
@@ -103,5 +104,5 @@ public class CriticalTests
         await Assert.That(target.Items.Values.Count).IsEqualTo(2);
         await Assert.That(target.Items.Values).Contains("a");
         await Assert.That(target.Items.Values).Contains("b");
-    }
+    }    
 }

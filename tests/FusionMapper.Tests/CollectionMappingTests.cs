@@ -123,17 +123,17 @@ public class CollectionMappingTests
         await Assert.That(target.ItemsNameFirstOrDefault).IsEqualTo("A");
     }
 
-    private sealed class SourceWithItems
+    internal sealed class SourceWithItems
     {
-        public IEnumerable<ItemSource> Items { get; set; }
+        public IEnumerable<ItemSource>? Items { get; set; }
     }
 
-    private sealed class TargetWithItemsCount
+    internal sealed class TargetWithItemsCount
     {
         public int ItemsCount { get; set; }
     }
 
-    private sealed class TargetWithItemsNameFirstOrDefault
+    internal sealed class TargetWithItemsNameFirstOrDefault
     {
         public string? ItemsNameFirstOrDefault { get; set; }
     }

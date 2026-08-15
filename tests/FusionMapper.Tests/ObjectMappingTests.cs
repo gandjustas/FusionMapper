@@ -91,7 +91,7 @@ public class ObjectMappingTests
     {
         SimpleSource? source = null;
 
-        var result = source.Map().To<SimpleTarget>();
+        var result = source.Map().To<SimpleTarget?>();
 
         await Assert.That(result).IsNull();
     }
