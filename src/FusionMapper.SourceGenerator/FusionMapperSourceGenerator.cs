@@ -78,9 +78,9 @@ public sealed class FusionMapperInterceptorGenerator : IIncrementalGenerator
 
         // Use the provider inside your source output register step
 
-        context.RegisterSourceOutput(interceptableCandidates.Collect().Combine(options), static (spc, candidate) =>
+        context.RegisterSourceOutput(interceptableCandidates.Collect().Combine(mappings).Combine(options), static (spc, candidate) =>
         {
-            var (candidates, options) = candidate;
+            var ((candidates, mappings), options) = candidate;
 
             if (!options.IsEnabled) return;
 
@@ -89,9 +89,9 @@ public sealed class FusionMapperInterceptorGenerator : IIncrementalGenerator
             //    spc.ReportDiagnostic(Diagnostic.Create(AnonymousSourceRule, c.Location));
             //}
 
-            if (options.DotnetVersion >= 10 && candidates.Length > 0)
+            if (options.DotnetVersion >= 9 && candidates.Length > 0)
             {
-                spc.AddSource("FusionMapperInterceptors.g.cs", SourceText.From(InterceptorGenerator.Execute(candidates), Encoding.UTF8));
+                spc.AddSource("FusionMapperInterceptors.g.cs", SourceText.From(InterceptorGenerator.Execute(candidates, mappings), Encoding.UTF8));
             }
         });
     }

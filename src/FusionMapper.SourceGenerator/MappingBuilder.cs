@@ -36,7 +36,7 @@ class MappingBuilder
 
     private Mapping BuildMapping(INamedTypeSymbol? sourceType, INamedTypeSymbol? targetType)
     {
-        // Itentionaly do nothing for now, we will implement this later when we have more information about the source and target types.
+        // TODO: analyze types and create mappings
         return new();
     }
 

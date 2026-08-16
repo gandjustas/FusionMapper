@@ -12,9 +12,11 @@
 		<EnforceExtendedAnalyzerRules>true</EnforceExtendedAnalyzerRules>
 		<NoWarn>1701;1702;RS2008;RSEXPERIMENTAL002</NoWarn>
 		<WarningsAsErrors>$(WarningsAsErrors);NU1605;Nullable</WarningsAsErrors>
+		<IsPackable>true</IsPackable>
 	</PropertyGroup>
 
-	<PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Release|AnyCPU'">
+	<PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Release|AnyCPU'">  
+		<NoWarn>$(NoWarn);NU5128</NoWarn>
 	  <TreatWarningsAsErrors>True</TreatWarningsAsErrors>
 	</PropertyGroup>
 
@@ -30,8 +32,8 @@
 
 	<ItemGroup>
 		<None Include="$(OutputPath)\$(AssemblyName).dll" Pack="true" PackagePath="analyzers/dotnet/cs" Visible="false" />
-		<None Include="$(AssemblyName).props" Pack="true" PackagePath="build" Visible="true" />
-		<None Include="$(AssemblyName).targets" Pack="true" PackagePath="build" Visible="true" />
+		<None Include="$(PackageId).props" Pack="true" PackagePath="build" Visible="true" />
+		<None Include="$(PackageId).targets" Pack="true" PackagePath="build" Visible="true" />
 	</ItemGroup>
 
 </Project>

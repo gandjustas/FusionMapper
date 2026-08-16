@@ -28,13 +28,11 @@ public class FusionMapper<TSource, TTarget>
     private FusionMapper() { }
     public static TTarget Map(TSource source)
     {
-#pragma warning disable S2955
-        if (source == null)            
+        if (source is null)            
         {
             var targetType = typeof(TTarget);
             if (targetType.IsClass || Nullable.GetUnderlyingType(targetType) != null) return default!;
         }
-#pragma warning restore S2955
         return creator.Value(source);
     }
 

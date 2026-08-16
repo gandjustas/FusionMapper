@@ -1,4 +1,5 @@
-﻿using System.Text;
+﻿using System.Collections.Immutable;
+using System.Text;
 using Microsoft.CodeAnalysis;
 using Microsoft.CodeAnalysis.CSharp;
 
@@ -6,7 +7,7 @@ namespace FusionMapper.SourceGenerator;
 
 static class InterceptorGenerator
 {
-    public static string Execute(IEnumerable<Interceptable> candidates)
+    public static string Execute(IEnumerable<Interceptable> candidates, ImmutableDictionary<(TypeModel Source, TypeModel Target), Mapping> mappings)
     {
         StringBuilder sb = GenerateHeader();
 
@@ -68,22 +69,25 @@ static class InterceptorGenerator
             """);
 
 
+        // Temporary
+        sb.AppendLine("""
+                static file class Mapper<TSource, TTarget>
+                {
+                    [global::System.Runtime.CompilerServices.UnsafeAccessor(global::System.Runtime.CompilerServices.UnsafeAccessorKind.StaticMethod, Name = nameof(Map))]
+                    public static extern TTarget Map(global::FusionMapper.FusionMapper<TSource, TTarget> c, TSource source);
+            
+                    [global::System.Runtime.CompilerServices.UnsafeAccessor(global::System.Runtime.CompilerServices.UnsafeAccessorKind.StaticMethod, Name = nameof(Map))]
+                    public static extern TTarget Map(global::FusionMapper.FusionMapper<TSource, TTarget> c, TSource source, TTarget target);            
+                        
+                    [global::System.Runtime.CompilerServices.UnsafeAccessor(global::System.Runtime.CompilerServices.UnsafeAccessorKind.StaticMethod, Name = nameof(Project))]
+                    public static extern global::System.Linq.IQueryable<TTarget> Project(global::FusionMapper.FusionMapper<TSource, TTarget> c, global::System.Linq.IQueryable<TSource> source);
+                }
+            
+            """);
 
         sb.AppendLine($$"""
                 static file class Interceptors
-                {
-                    [global::System.Runtime.CompilerServices.UnsafeAccessor(global::System.Runtime.CompilerServices.UnsafeAccessorKind.StaticMethod, Name = nameof(GetCreationLambda))]
-                    static extern global::System.Linq.Expressions.LambdaExpression GetCreationLambda(global::FusionMapper.FusionMapper.State c, Type source, Type target);
-
-                    [global::System.Runtime.CompilerServices.UnsafeAccessor(global::System.Runtime.CompilerServices.UnsafeAccessorKind.StaticMethod, Name = nameof(GetCreationDelegate))]
-                    static extern global::System.Delegate GetCreationDelegate(global::FusionMapper.FusionMapper.State c, Type source, Type target);
-            
-                    [global::System.Runtime.CompilerServices.UnsafeAccessor(global::System.Runtime.CompilerServices.UnsafeAccessorKind.StaticMethod, Name = nameof(GetAssignmentDelegate))]
-                    static extern global::System.Delegate GetAssignmentDelegate(global::FusionMapper.FusionMapper.State c, Type source, Type target);
-            
-                    [global::System.Runtime.CompilerServices.UnsafeAccessor(global::System.Runtime.CompilerServices.UnsafeAccessorKind.StaticMethod, Name = nameof(Rewrite))]
-                    static extern global::System.Linq.IQueryable<T> Rewrite<T>(global::FusionMapper.FusionMapper.State c, global::System.Linq.IQueryable<T> query);
-            
+                {           
             """);
 
         return sb;
@@ -129,10 +133,8 @@ static class InterceptorGenerator
                 {
         """);
         AppendGetSource(sb, source);
-        AppendCreationNullChecks(sb, source, target);
         sb.AppendLine($$"""
-                    var func = (global::System.Func<{{source.Signature}}, {{target.Signature}}>)GetCreationDelegate(null!, typeof({{source.Runtime}}), typeof({{target.Runtime}}));
-                    return func(source);
+                    return Mapper<{{source.Signature}}, {{target.Signature}}>.Map(null!, source);
                 }
         """);
     }
@@ -144,11 +146,8 @@ static class InterceptorGenerator
                 {
         """);
         AppendGetSource(sb, source);
-        AppendAssignmentNullChecks(sb, source, target);
         sb.AppendLine($$"""
-                    var action = (global::System.Action<{{source.Signature}}, {{target.Signature}}>)GetAssignmentDelegate(null!, typeof({{source.Runtime}}), typeof({{target.Runtime}}));
-                    action(source, target);
-                    return target;
+                    return Mapper<{{source.Signature}}, {{target.Signature}}>.Map(null!, source, target);
                 }
         """);
     }
@@ -160,10 +159,7 @@ static class InterceptorGenerator
                 public static global::System.Linq.IQueryable<{{target.Signature}}> Project__{{methodName}}(this in {{receiver}}<{{source.Signature}}> receiver)
                 {
                     ref System.Linq.IQueryable<{{source.Signature}}> source = ref SourceAccessor<{{source.Runtime}}>.GetQueryable(in receiver);
-                    global::System.ArgumentNullException.ThrowIfNull(source);
-                    var rewrittenSource = Rewrite(null!, source);
-                    var lambda = (global::System.Linq.Expressions.Expression<global::System.Func<{{source.Signature}}, {{target.Signature}}>>)GetCreationLambda(null!, typeof({{source.Runtime}}), typeof({{target.Runtime}}));
-                    return global::System.Linq.Queryable.Select<{{source.Signature}}, {{target.Signature}}>(rewrittenSource, lambda);
+                    return Mapper<{{source.Signature}}, {{target.Signature}}>.Project(null!, source);
                 }
         """);
     }
@@ -197,28 +193,9 @@ static class InterceptorGenerator
 
     private static void AppendAssignmentNullChecks(StringBuilder sb, TypeModel source, TypeModel target)
     {
-        if (source.CanBeNullRuntime || source.IsNullableValue)
+        if (source.IsNullableByNullability)
         {
-            if (source.IsNullableValue)
-            {
-                sb.AppendLine("            if (!source.HasValue) return target;");
-            }
-            else if (source.IsReference)
-            {
-                if (source.IsNullableByNullability)
-                {
-                    sb.AppendLine("            if (source is null) return target;");
-                }
-                else
-                {
-                    sb.AppendLine("            global::System.ArgumentNullException.ThrowIfNull(source);");
-                }
-            }
-        }
-
-        if (target.IsReference)
-        {
-            sb.AppendLine("            global::System.ArgumentNullException.ThrowIfNull(target);");
+            sb.AppendLine("            if (source is null) return target;");
         }
     }
 
