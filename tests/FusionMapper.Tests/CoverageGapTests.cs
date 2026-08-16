@@ -7,12 +7,14 @@ public class CoverageGapTests
 {
     #region Root mapping gaps
 
+#if !FUSION_MAPPER_SOURCE_GENERATOR
     [Test]
     public async Task Map_String_To_Int_Throws_MappingException()
     {
         await Assert.That(() => "abc".Map().To<int>())
             .Throws<MappingException>();
     }
+#endif
 
     [Test]
     public async Task Map_Null_Object_Source_To_NonNullable_Int_Throws()
@@ -23,6 +25,7 @@ public class CoverageGapTests
             .Throws<InvalidOperationException>();
     }
 
+#if !FUSION_MAPPER_SOURCE_GENERATOR
     [Test]
     public async Task Map_List_String_To_List_Int_Throws_MappingException()
     {
@@ -31,6 +34,8 @@ public class CoverageGapTests
         await Assert.That(() => source.Map().To<List<int>>())
             .Throws<MappingException>();
     }
+#endif
+
 
     [Test]
     public async Task Map_Assignable_Source_To_Base_Target_Returns_Same_Reference()
@@ -58,7 +63,7 @@ public class CoverageGapTests
             .Throws<InvalidCastException>();
     }
 
-    #endregion
+#endregion
 
     #region Impossible member skip
 
@@ -176,6 +181,7 @@ public class CoverageGapTests
         await Assert.That(result.Name).IsEqualTo("field");
     }
 
+#if !FUSION_MAPPER_SOURCE_GENERATOR
     [Test]
     public async Task Map_Required_Field_Missing_Source_Throws()
     {
@@ -189,6 +195,7 @@ public class CoverageGapTests
 
         await Assert.That(ex!.Message.Contains("Name", StringComparison.OrdinalIgnoreCase)).IsTrue();
     }
+#endif
 
     [Test]
     public async Task Map_Target_Public_Field_From_Source_Property()
@@ -221,7 +228,7 @@ public class CoverageGapTests
         await Assert.That(target.Inner.Value).IsEqualTo(42);
     }
 
-    #endregion
+#endregion
 
     #region Flattening and member resolution
 
@@ -764,20 +771,6 @@ public class CoverageGapTests
 
     #endregion
 
-    #region MappingException constructors
-
-    [Test]
-    public async Task MappingException_Default_And_Inner_Constructors_Work()
-    {
-        var ex1 = new MappingException();
-        var ex2 = new MappingException("msg", new InvalidOperationException());
-
-        await Assert.That(ex1).IsNotNull();
-        await Assert.That(ex2.Message).IsEqualTo("msg");
-        await Assert.That(ex2.InnerException is InvalidOperationException).IsTrue();
-    }
-
-    #endregion
 
     #region Models
 

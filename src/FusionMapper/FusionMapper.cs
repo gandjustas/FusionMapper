@@ -4,7 +4,7 @@ namespace FusionMapper;
 
 
 public static class FusionMapper
-{ 
+{
     public static FusionSource<TSource> Map<TSource>(this TSource source)
         => new(source);
 
@@ -28,7 +28,7 @@ public class FusionMapper<TSource, TTarget>
     private FusionMapper() { }
     public static TTarget Map(TSource source)
     {
-        if (source is null)            
+        if (source is null)
         {
             var targetType = typeof(TTarget);
             if (targetType.IsClass || Nullable.GetUnderlyingType(targetType) != null) return default!;

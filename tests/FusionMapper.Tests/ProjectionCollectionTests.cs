@@ -43,7 +43,9 @@ public class ProjectionCollectionTests
             .Project()
             .To<NullItemsTarget>()
             .ToList();
-
+        
+        var r1 = global::System.Linq.Queryable.Select<global::FusionMapper.Tests.NullItemsSource, global::FusionMapper.Tests.NullItemsTarget>(source, (source => new global::FusionMapper.Tests.NullItemsTarget() { Items = (source.Items == null ? default : global::System.Linq.Enumerable.ToList<global::FusionMapper.Tests.ItemTarget>(global::System.Linq.Enumerable.Select(source.Items, static __item => new global::FusionMapper.Tests.ItemTarget() { Name = __item.Name, Value = __item.Value }))) }));
+        var r2 = global::System.Linq.Queryable.Select<global::FusionMapper.Tests.NullItemsSource, global::FusionMapper.Tests.NullItemsTarget>(source, (source => new global::FusionMapper.Tests.NullItemsTarget() { Items = (source.Items == null ? default : global::System.Linq.Enumerable.ToList<global::FusionMapper.Tests.ItemTarget>(global::System.Linq.Enumerable.Select(source.Items, static __item => new global::FusionMapper.Tests.ItemTarget() { Name = __item.Name, Value = __item.Value }))) })); 
         await Assert.That(result.Count).IsEqualTo(1);
         await Assert.That(result[0].Items).IsNull();
     }

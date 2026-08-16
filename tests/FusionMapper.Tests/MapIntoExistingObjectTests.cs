@@ -43,7 +43,7 @@ public class MapIntoExistingObjectTests
     public async Task Map_To_Existing_Object_With_Collection_Replaces_Items()
     {
         OrderSource source = new();
-        source.Items.Add(new (){ Name = "A" });
+        source.Items.Add(new() { Name = "A" });
         source.Items.Add(new() { Name = "B" });
 
         OrderTarget target = new();

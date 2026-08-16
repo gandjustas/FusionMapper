@@ -1,4 +1,4 @@
-<Project Sdk="Microsoft.NET.Sdk">
+﻿<Project Sdk="Microsoft.NET.Sdk">
 
 	<PropertyGroup>
 		<ImplicitUsings>enable</ImplicitUsings>
@@ -10,7 +10,7 @@
 		<EmitCompilerGeneratedFiles>true</EmitCompilerGeneratedFiles>
 		<EnableFusionMapperInterceptor>true</EnableFusionMapperInterceptor>
 		<InterceptorsPreviewNamespaces Condition="EnableFusionMapperInterceptor!='false'">$(InterceptorsPreviewNamespaces);FusionMapper.SourceGenerator.Interceptors</InterceptorsPreviewNamespaces>
-		<InterceptorsNamespaces  Condition="EnableFusionMapperInterceptor!='false'">$(InterceptorsNamespaces);FusionMapper.SourceGenerator.Interceptors</InterceptorsNamespaces>
+		<InterceptorsNamespaces Condition="EnableFusionMapperInterceptor!='false'">$(InterceptorsNamespaces);FusionMapper.SourceGenerator.Interceptors</InterceptorsNamespaces>
 	</PropertyGroup>
 
 	<ItemGroup>
@@ -28,4 +28,9 @@
 	<ItemGroup>
     	<CompilerVisibleProperty Include="EnableFusionMapperInterceptor" />
   	</ItemGroup>
+
+	<PropertyGroup Condition="'$(EnableFusionMapperInterceptor)' == 'true'">
+		<DefineConstants Condition="'$(DefineConstants)' != ''">$(DefineConstants);FUSION_MAPPER_SOURCE_GENERATOR</DefineConstants>
+		<DefineConstants Condition="'$(DefineConstants)' == ''">FUSION_MAPPER_SOURCE_GENERATOR</DefineConstants>
+	</PropertyGroup>
 </Project>

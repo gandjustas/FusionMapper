@@ -5,13 +5,15 @@
 		<TargetFramework>net10.0</TargetFramework>
 		<ImplicitUsings>enable</ImplicitUsings>
 		<Nullable>enable</Nullable>
-		<EnableFusionMapperInterceptor>false</EnableFusionMapperInterceptor>
+		<EnableFusionMapperInterceptor>true</EnableFusionMapperInterceptor>
+		<InterceptorsPreviewNamespaces Condition="EnableFusionMapperInterceptor!='false'">$(InterceptorsPreviewNamespaces);FusionMapper.SourceGenerator.Interceptors</InterceptorsPreviewNamespaces>
+		<InterceptorsNamespaces  Condition="EnableFusionMapperInterceptor!='false'">$(InterceptorsNamespaces);FusionMapper.SourceGenerator.Interceptors</InterceptorsNamespaces>
 	</PropertyGroup>
 
-	<PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Debug|AnyCPU'">
-		<Optimize>False</Optimize>
-	</PropertyGroup>
-
+	<ItemGroup>
+		<CompilerVisibleProperty Include="EnableFusionMapperInterceptor" />
+	</ItemGroup>	
+	
 	<ItemGroup>
 		<PackageReference Include="AutoMapper" Version="16.2.0" />
 		<PackageReference Include="BenchmarkDotNet" Version="0.15.8" />
@@ -21,14 +23,6 @@
 
 	<ItemGroup>
 		<ProjectReference Include="..\..\src\FusionMapper\FusionMapper.csproj" />
-	</ItemGroup>
-
-	<PropertyGroup>
-		<!-- Для preview-режима interceptors, если твой SDK это еще требует -->
-		<InterceptorsPreviewNamespaces>$(InterceptorsPreviewNamespaces);FusionMapper.Interceptors</InterceptorsPreviewNamespaces>
-	</PropertyGroup>
-
-	<ItemGroup>
 		<ProjectReference Include="..\..\src\FusionMapper.SourceGenerator\FusionMapper.SourceGenerator.csproj" OutputItemType="Analyzer" ReferenceOutputAssembly="false" />
 	</ItemGroup>
 </Project>

@@ -1,5 +1,73 @@
 namespace FusionMapper.Tests;
 
+#region Simple
+
+public class SimpleSource
+{
+    public string Name { get; set; } = string.Empty;
+    public int Value { get; set; }
+}
+
+public class SimpleTarget
+{
+    public string Name { get; set; } = string.Empty;
+    public int Value { get; set; }
+}
+
+#endregion
+
+#region Case sensitivity
+
+public class CaseSource
+{
+    public string? nAmE { get; set; }
+    public int vAlUe { get; set; }
+}
+
+public class CaseTarget
+{
+    public string? Name { get; set; }
+    public int Value { get; set; }
+}
+
+public class ExactWinsSource
+{
+    public string Name { get; set; } = "exact";
+    public string NAME { get; set; } = "upper";
+}
+
+public class ExactWinsTarget
+{
+    public string Name { get; set; } = string.Empty;
+}
+
+public class AmbiguousSource
+{
+    public string Name { get; set; } = "a";
+    public string NAME { get; set; } = "b";
+}
+
+public class AmbiguousTarget
+{
+    public string? name { get; set; }
+}
+
+#endregion
+
+#region Nullable
+
+public class NullableSource
+{
+    public int? Value { get; set; }
+}
+
+public class NullableTarget
+{
+    public int? Value { get; set; }
+}
+
+#endregion
+
 public class NestedObject
 {
     public string City { get; set; } = string.Empty;

@@ -70,7 +70,7 @@ public sealed class ExpressionRewriter : ExpressionVisitor
 
     private Expression InlineProjection(Expression sourceExpression, Type sourceType, Type targetType)
     {
-        var lambda =  cache.GetOrAdd((sourceType, targetType), key => MappingBuilder.BuildCreationLambda(key.Source, key.Target));
+        var lambda = cache.GetOrAdd((sourceType, targetType), key => MappingBuilder.BuildCreationLambda(key.Source, key.Target));
         var parameter = lambda.Parameters[0];
 
         if (parameter.Type != sourceExpression.Type &&

@@ -103,5 +103,5 @@ public class CriticalTests
         await Assert.That(target.Items.Values.Count).IsEqualTo(2);
         await Assert.That(target.Items.Values).Contains("a");
         await Assert.That(target.Items.Values).Contains("b");
-    }    
+    }
 }

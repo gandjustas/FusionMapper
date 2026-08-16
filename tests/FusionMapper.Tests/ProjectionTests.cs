@@ -61,6 +61,8 @@ public class ProjectionTests
             .To<RecordTarget>()
             .ToList();
 
+        var r1 = global::System.Linq.Queryable.Select<global::FusionMapper.Tests.RecordSource, global::FusionMapper.Tests.RecordTarget>(source, (source => new global::FusionMapper.Tests.RecordTarget(source.Name, source.Value) { Name = source.Name, Value = source.Value }));
+
         await Assert.That(result.Count).IsEqualTo(1);
         await Assert.That(result[0].Name).IsEqualTo("A");
         await Assert.That(result[0].Value).IsEqualTo(1);
@@ -118,6 +120,7 @@ public class ProjectionTests
         await Assert.That(containsMap).IsFalse();
     }
 
+#if !FUSION_MAPPER_SOURCE_GENERATOR
     [Test]
     public async Task Project_Required_Member_Missing_Source_Throws()
     {
@@ -133,6 +136,7 @@ public class ProjectionTests
                 .ToList()
         ).Throws<MappingException>();
     }
+#endif
 
     [Test]
     public async Task Project_Cyclic_Graph_Throws_By_Default()

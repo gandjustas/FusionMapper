@@ -9,5 +9,6 @@
   </Folder>
   <Folder Name="/tests/">
     <Project Path="tests/FusionMapper.Tests/FusionMapper.Tests.csproj" />
+    <Project Path="tests/FusionMapper.SourceGenerator.Tests/FusionMapper.SourceGenerator.Tests.csproj" />
   </Folder>
 </Solution>

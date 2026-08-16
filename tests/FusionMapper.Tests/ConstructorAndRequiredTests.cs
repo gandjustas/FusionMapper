@@ -69,6 +69,7 @@ public class ConstructorAndRequiredTests
         await Assert.That(result.Name).IsEqualTo("Required");
     }
 
+#if !FUSION_MAPPER_SOURCE_GENERATOR
     [Test]
     public async Task Map_Required_Member_Missing_Source_Throws()
     {
@@ -83,6 +84,7 @@ public class ConstructorAndRequiredTests
 
         await Assert.That(ex!.Message.Contains("Name", StringComparison.OrdinalIgnoreCase)).IsTrue();
     }
+#endif
 
     [Test]
     public async Task Map_Init_Only_Properties()

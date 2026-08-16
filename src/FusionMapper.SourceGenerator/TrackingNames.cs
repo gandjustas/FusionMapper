@@ -11,4 +11,8 @@ static class TrackingNames
     public static string Mappings => nameof(Mappings);
 
     public static string InterceptorsIsEnabled => nameof(InterceptorsIsEnabled);
+
+    public static string AccessorFields => nameof(AccessorFields);
+
+    public static string RawCandidates => nameof(RawCandidates);
 }
