@@ -12,7 +12,8 @@ record TypeModel(
     bool IsValueType,
     bool IsNullableValue,
     NullableAnnotation Annotation,
-    bool IsAnonymous)
+    bool IsAnonymous,
+    string? NullableUnderlyingRuntime)
 {
     public bool IsNullableByNullability =>
         IsNullableValue ||
@@ -50,10 +51,10 @@ record TypeModel(
     );
 
     private static readonly SymbolDisplayFormat FullNameFormat = new(
-    typeQualificationStyle: SymbolDisplayTypeQualificationStyle.NameAndContainingTypesAndNamespaces,
-    genericsOptions: SymbolDisplayGenericsOptions.IncludeTypeParameters,
-    miscellaneousOptions: SymbolDisplayMiscellaneousOptions.UseSpecialTypes
-);
+        typeQualificationStyle: SymbolDisplayTypeQualificationStyle.NameAndContainingTypesAndNamespaces,
+        genericsOptions: SymbolDisplayGenericsOptions.IncludeTypeParameters,
+        miscellaneousOptions: SymbolDisplayMiscellaneousOptions.UseSpecialTypes
+    );
 
     public static TypeModel Create(ITypeSymbol type)
     {
@@ -61,6 +62,13 @@ record TypeModel(
             type.IsValueType &&
             type is INamedTypeSymbol named &&
             named.ConstructedFrom.SpecialType == SpecialType.System_Nullable_T;
+
+        string? nullableUnderlyingRuntime = null;
+
+        if (isNullableValue && type is INamedTypeSymbol nullableNamed)
+        {
+            nullableUnderlyingRuntime = nullableNamed.TypeArguments[0].ToDisplayString(RuntimeFormat);
+        }
 
         return new TypeModel(
             type.ToDisplayString(FullNameFormat),
@@ -71,7 +79,8 @@ record TypeModel(
             type.IsValueType,
             isNullableValue,
             type.NullableAnnotation,
-            type.IsAnonymousType);
+            type.IsAnonymousType,
+            nullableUnderlyingRuntime);
     }
 
     private static string MakeValidIdentifier(string candidate)

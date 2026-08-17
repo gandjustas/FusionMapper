@@ -15,7 +15,8 @@ class SourceEmmiter
     {
         StringBuilder sb = new(input.Length * 300);
         AppendGenerateFileHeader(sb);
-        sb.AppendLine("#pragma warning disable CS8629"); //Suppress erors Nullable<T> -> T
+        sb.AppendLine("#pragma warning disable CS8321"); // The local function 'Map__FusionMapper_Tests_ItemSource____To__FusionMapper_Tests_ItemTarget__' is declared but never used
+        sb.AppendLine("#pragma warning disable CS8629"); // Suppress erors Nullable<T> -> T
         sb.AppendLine();
         sb.AppendLine($"namespace {AssemblyName};");
         sb.AppendLine();
@@ -29,6 +30,7 @@ class SourceEmmiter
 
         sb.AppendLine("}");
         sb.AppendLine("#pragma warning restore CS8629");
+        sb.AppendLine("#pragma warning restore CS8321");
         return sb.ToString();
     }
 
@@ -117,6 +119,8 @@ class SourceEmmiter
                     }
                 }
             }
+            #pragma warning disable CS8321
+
             namespace {{AssemblyName}}
             {
                 static file class SourceAccessor<T>
@@ -152,6 +156,7 @@ class SourceEmmiter
         sb.AppendLine("""
                 }
             }
+            #pragma warning restore CS8321
             """);
 
         return sb.ToString();
@@ -322,10 +327,10 @@ class SourceEmmiter
             try
             {
                 var methodName = GetMethodName(source, target, kind);
-                var emittedMapping = MappingEmitter.Emit(kind, mapping);
                 switch (kind)
                 {
                     case CallKind.SourceTo:
+                        var emittedMapping = MappingEmitter.Emit(kind, mapping).ToArray();
                         AppendGeneratedMethodAttributes(sb, 1);
                         sb.AppendLine($"    public static {target.Signature} {methodName}({source.Signature} source)");
                         sb.AppendLine("    {");
@@ -335,6 +340,7 @@ class SourceEmmiter
                         break;
 
                     case CallKind.SourceToExisting:
+                        emittedMapping = [.. MappingEmitter.Emit(kind, mapping)];
                         AppendGeneratedMethodAttributes(sb, 1);
                         sb.AppendLine($"    public static {target.Signature} {methodName}({source.Signature} source, {target.Signature} target)");
                         sb.AppendLine("    {");
@@ -343,8 +349,9 @@ class SourceEmmiter
                         sb.AppendLine();
                         break;
                     case CallKind.ProjectionTo:
+                        emittedMapping = [.. MappingEmitter.Emit(kind, mapping)];
                         sb.AppendLine($$"""
-                                public static global::System.Linq.Expressions.Expression<global::System.Func<{{source.Signature}}, {{target.Signature}}>> {{methodName}} = {{emittedMapping.First()}};
+                                public static global::System.Linq.Expressions.Expression<global::System.Func<{{source.Signature}}, {{target.Signature}}>> {{methodName}} = {{emittedMapping[0]}};
                             """);
                         sb.AppendLine();
                         break;
@@ -433,7 +440,7 @@ class SourceEmmiter
         var prefix = kind switch
         {
             CallKind.SourceTo => "Map",
-            CallKind.SourceToExisting => "MapInto",
+            CallKind.SourceToExisting => "Map",
             CallKind.ProjectionTo => "Project",
             _ => "Map"
         };

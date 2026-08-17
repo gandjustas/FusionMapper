@@ -22,27 +22,91 @@ internal sealed record AssignMapping : Mapping
     public required AssignmentKind Kind { get; init; }
 }
 
+internal enum AggregateKind
+{
+    Count,
+    Any,
+    All,
+    Sum,
+    Average,
+    Max,
+    Min,
+    First,
+    Last,
+    FirstOrDefault,
+    LastOrDefault
+}
+
+internal sealed record AggregateMapping : Mapping
+{
+    public required AggregateKind Kind { get; init; }
+
+    public required TypeModel ElementType { get; init; }
+
+    /// <summary>
+    /// Путь к свойству элемента коллекции, если агрегат имеет селектор.
+    /// Например: ItemsNameFirstOrDefault -> Selector = Name.
+    /// </summary>
+    public SourcePath? Selector { get; init; }
+
+    /// <summary>
+    /// Маппинг элемента коллекции в целевой тип.
+    /// Используется для First/Last без селектора.
+    /// </summary>
+    public Mapping? ElementMapping { get; init; }
+
+    /// <summary>
+    /// Маппинг результата агрегата в целевой тип.
+    /// Например, Count: int -> long, Any: bool -> bool.
+    /// </summary>
+    public Mapping? ResultMapping { get; init; }
+
+    /// <summary>
+    /// Факт для Emitter: можно ли читать Count как свойство.
+    /// </summary>
+    public required bool SourceHasCountProperty { get; init; }
+}
+
 internal sealed record ObjectMapping : Mapping
 {
-    public required ObjectConstructor Constructor { get; init; }
+    /// <summary>
+    /// Все допустимые конструкторы.
+    /// Выбор конкретного конструктора делает Emitter.
+    /// </summary>
+    public required ImmutableArray<ConstructorCandidate> Constructors { get; init; }
 
-    // Используется при создании нового объекта:
-    // new Target { Member = ... }
-    public required ImmutableArray<MemberBinding> Bindings { get; init; }
+    /// <summary>
+    /// Все члены target, которые Builder смог сопоставить с source.
+    /// Emitter сам решает, какие из них использовать для создания,
+    /// какие для обновления, какие пропустить.
+    /// </summary>
+    public required ImmutableArray<MemberBinding> Members { get; init; }
 
+    public required ImmutableArray<string> RequiredMemberNames { get; init; }
 }
-readonly record struct ObjectConstructor
+
+readonly record struct ConstructorCandidate
 {
-    public required ImmutableArray<ConstructorArgument> Arguments { get; init; }
+    public required ImmutableArray<ConstructorParameter> Parameters { get; init; }
+
+    public required bool SetsRequiredMembers { get; init; }
+
+    /// <summary>
+    /// Имена required/обычных членов, которые закрываются параметрами конструктора.
+    /// </summary>
+    public required ImmutableArray<string> AssignedMemberNames { get; init; }
 }
 
-readonly record struct ConstructorArgument
+readonly record struct ConstructorParameter
 {
-    public required TypeModel ArgumentType { get; init; }
+    public required TypeModel ParameterType { get; init; }
 
-    public required bool IsDefault { get; init; }
+    public required bool IsMapped { get; init; }
+
+    public required bool CanUseDefault { get; init; }
 
     public SourcePath? Source { get; init; }
+
     public Mapping? Value { get; init; }
 }
 
@@ -65,47 +129,51 @@ readonly record struct MemberBinding
 
     public required SourcePath Source { get; init; }
 
-    // Как маппится финальное значение source member -> target member.
     public required Mapping Value { get; init; }
 
     public required bool IsRequired { get; init; }
+
     public required bool IsInitOnly { get; init; }
+
+    /// <summary>
+    /// Можно ли прочитать член target.
+    /// Нужно для existing-mapping: mutate existing object/collection.
+    /// </summary>
+    public required bool CanRead { get; init; }
+
+    /// <summary>
+    /// Можно ли записать член target.
+    /// </summary>
+    public required bool CanWrite { get; init; }
+
+    /// <summary>
+    /// Target member является value type.
+    /// Emitter использует это, чтобы не пытаться мутировать struct inplace.
+    /// </summary>
+    public required bool IsTargetMemberValueType { get; init; }
 }
 
-internal abstract record CollectionBaseMapping : Mapping
+internal sealed record CollectionMapping : Mapping
 {
-    public required TypeModel ElementType { get; init; }
+    public required TypeModel ElementTypeName { get; init; }
+
     public required Mapping ElementMapping { get; init; }
+
+    public required CollectionCapabilities Capabilities { get; init; }
 }
 
-internal sealed record CollectionMapping : CollectionBaseMapping
+readonly record struct CollectionCapabilities
 {
+    public required bool IsArray { get; init; }
+    public required bool IsGenericList { get; init; }
+    public required bool IsKnownCollectionInterface { get; init; }
+
     public required bool HasClearMethod { get; init; }
     public required bool HasAddMethod { get; init; }
     public required bool HasAddRangeMethod { get; init; }
 
-}
+    public required bool HasParameterlessConstructor { get; init; }
+    public required bool HasEnumerableConstructor { get; init; }
 
-internal enum AggregateKind
-{
-    Count,
-    Any,
-    All,
-    Sum,
-    Average,
-    Max,
-    Min,
-    First,
-    Last,
-    FirstOrDefault,
-    LastOrDefault
-}
-
-internal sealed record AggregateMapping : CollectionBaseMapping
-{
-    public required AggregateKind Kind { get; init; }
-
-    public required SourcePath? ParameterSelector { get; init; }
-
-    public required Mapping? Mapping { get; init; }
+    public required bool HasCountProperty { get; init; }
 }
