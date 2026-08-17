@@ -50,7 +50,7 @@ public sealed class FusionMapperInterceptorGenerator : IIncrementalGenerator
             .WithTrackingName(TrackingNames.CSharpVersion);
 
         var interceptionEnabled = interceptionEnabledSetting.Combine(csharpSufficient).Select((t, _) => t.Left && t.Right);
-            
+
         var rawCandidates = context.SyntaxProvider
             .CreateSyntaxProvider(IsCandidate, Transform)
             .Combine(interceptionEnabled)
@@ -73,47 +73,7 @@ public sealed class FusionMapperInterceptorGenerator : IIncrementalGenerator
         var candidates = rawCandidates
             .Where(static c => !c.SourceSymbol.IsAnonymousType && !c.TargetSymbol.IsAnonymousType)
             .Combine(builder)
-            .Select((p, ct) => {
-                try 
-                {
-                    var mapping = p.Right.Build(p.Left.SourceSymbol, p.Left.TargetSymbol);
-                    if(p.Left.IsInsideExpressionTree)
-                    {
-                        return new Mapped
-                        {
-                            Location = p.Left.Location,
-                            Kind = p.Left.Kind,
-                            Source = p.Left.Source,
-                            Target = p.Left.Target,
-                            Mapping = mapping,
-                            IsInsideExpressionTree = true
-                        } as Candidate;
-                    }
-                    else
-                    {
-                        return new Interceptable
-                        {
-                            Location = p.Left.Location,
-                            InterceptableLocation = p.Left.Interceptable,
-                            Kind = p.Left.Kind,
-                            Source = p.Left.Source,
-                            Target = p.Left.Target,
-                            Mapping = mapping
-                        } as Candidate;
-                    }
-                }
-                catch(Exception ex)
-                {
-                    return new MappingFailed
-                    {
-                        Kind = p.Left.Kind,
-                        Location = p.Left.Location,
-                        Source = p.Left.Source,
-                        Target = p.Left.Target,
-                        Exception = ex
-                    } as Candidate;
-                }
-            })
+            .Select(MapCandidates)
             .WithTrackingName(TrackingNames.Candidates);
 
         var failed = candidates
@@ -130,9 +90,18 @@ public sealed class FusionMapperInterceptorGenerator : IIncrementalGenerator
                 fail.Exception.Message));
         });
 
-        var inteceptable = candidates
-            .Where(static c => c is Interceptable)
-            .Select(static (c, _) => (Interceptable)c);
+        var mapped = candidates
+            .Where(static c => c is Mapped)
+            .Select(static (c, _) => (Mapped)c)
+            .Collect();
+
+        context.RegisterSourceOutput(mapped, static (spc, input) =>
+        {
+            if (input.Length == 0) return;
+            var source = SourceEmmiter.EmitMappers(spc, input);
+            spc.AddSource("FusionMapper.g.cs", SourceText.From(source, Encoding.UTF8));
+        });
+
 
         IncrementalValueProvider<int> targetFrameworkProvider = context.AnalyzerConfigOptionsProvider
             .Select((options, _) =>
@@ -152,26 +121,19 @@ public sealed class FusionMapperInterceptorGenerator : IIncrementalGenerator
             .Select(static (compilation, ct) => FusionAccessorMetadata.Resolve(compilation, ct))
             .WithTrackingName(TrackingNames.AccessorFields);
 
-        var options = csharpSufficient
-            .Combine(interceptionEnabledSetting)
-            .Select((t, _) => t.Left && t.Right)
-            .Combine(targetFrameworkProvider)
-            .Select((t, _) => new GeneratorOptions(t.Left, t.Right));
 
-
-        context.RegisterSourceOutput(inteceptable
-            .Collect()
-            .Combine(options)
-            .Combine(accessorFields),
+        context.RegisterSourceOutput(mapped.Combine(targetFrameworkProvider).Combine(accessorFields),
         static (spc, input) =>
         {
-            var ((candidates, options), fields) = input;
+            var ((candidates, dotnetVersion), fields) = input;
 
-            if (candidates.Length == 0)
-                return;
+            if (candidates.Length == 0) return;
+
+            var initalizerSource = SourceEmmiter.EmitInitializer(candidates, dotnetVersion);
+            spc.AddSource("FusionMapper.Initializer.g.cs", SourceText.From(initalizerSource, Encoding.UTF8));
 
 
-            if (options.DotnetVersion >= 9)
+            if (dotnetVersion >= 9)
             {
                 if (!fields.SourceValueFieldResolved)
                 {
@@ -191,60 +153,54 @@ public sealed class FusionMapperInterceptorGenerator : IIncrementalGenerator
                         fields.ProjectionValueField));
                 }
 
-                var source = InterceptorGenerator.EmitInterceptors(spc, candidates, fields);
-                spc.AddSource(
-                    "FusionMapperInterceptors.g.cs",
-                    SourceText.From(source, Encoding.UTF8));
+                var interceptorStore = SourceEmmiter.EmitInterceptors(candidates.OfType<Interceptable>(), fields);
+                spc.AddSource("FusionMapper.Interceptors.g.cs", SourceText.From(interceptorStore, Encoding.UTF8));
             }
         });
+    }
 
-        //var expressionTreeCandidates = usableCandidates
-        //    .Where(static c => c.IsInsideExpressionTree)
-        //    .Select(static (c, _) => new Interceptable(
-        //        c.Location,
-        //        c.Interceptable,
-        //        c.Kind,
-        //        c.Source,
-        //        c.Target))
-        //    .WithTrackingName("ExpressionTreeCandidates");
-
-        //context.RegisterImplementationSourceOutput(expressionTreeCandidates.Collect().Combine(mappings).Combine(options), static (spc, input) =>
-        //{
-        //    var ((candidates, mappings), options) = input;
-
-        //    if (!options.IsEnabled)
-        //        return;
-        //    if (options.DotnetVersion < 8 || candidates.Length == 0)
-        //        return;
-
-
-        //    var validCandidates = new List<Interceptable>();
-
-        //    foreach (var candidate in candidates)
-        //    {
-        //        if (!mappings.TryGetValue((candidate.Source, candidate.Target), out var mapping))
-        //            continue;
-
-        //        if (!mapping.Success)
-        //        {
-        //            spc.ReportDiagnostic(Diagnostic.Create(
-        //                IncompatibleMappingRule,
-        //                candidate.Location,
-        //                candidate.Source.FullName,
-        //                candidate.Target.FullName,
-        //                mapping.Error ?? "unknown error"));
-        //            continue;
-        //        }
-
-        //        validCandidates.Add(candidate);
-        //    }
-
-        //    if (validCandidates.Count > 0)
-        //    {
-        //        var source = InterceptorGenerator.EmitExpressionCache(validCandidates, mappings);
-        //        spc.AddSource("FusionMapperExpressionCache.g.cs", SourceText.From(source, Encoding.UTF8));
-        //    }
-        //});
+    private Candidate MapCandidates((RawCandidate Left, MappingBuilder Right) tuple, CancellationToken token)
+    {
+        var (candidate, builder) = tuple;
+        try
+        {
+            var mapping = builder.Build(candidate.SourceSymbol, candidate.TargetSymbol);
+            if (candidate.IsInsideExpressionTree)
+            {
+                return new Mapped
+                {
+                    Location = candidate.Location,
+                    Kind = candidate.Kind,
+                    Source = candidate.Source,
+                    Target = candidate.Target,
+                    Mapping = mapping,
+                    IsInsideExpressionTree = true
+                };
+            }
+            else
+            {
+                return new Interceptable
+                {
+                    Location = candidate.Location,
+                    InterceptableLocation = candidate.Interceptable,
+                    Kind = candidate.Kind,
+                    Source = candidate.Source,
+                    Target = candidate.Target,
+                    Mapping = mapping
+                };
+            }
+        }
+        catch (Exception ex)
+        {
+            return new MappingFailed
+            {
+                Kind = candidate.Kind,
+                Location = candidate.Location,
+                Source = candidate.Source,
+                Target = candidate.Target,
+                Exception = ex
+            };
+        }
     }
 
     private static bool IsCandidate(SyntaxNode node, CancellationToken ct) =>

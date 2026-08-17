@@ -15,4 +15,6 @@ static class TrackingNames
     public static string AccessorFields => nameof(AccessorFields);
 
     public static string RawCandidates => nameof(RawCandidates);
+
+    public static string ExpressionTreeCandidates => nameof(ExpressionTreeCandidates);
 }

@@ -68,18 +68,44 @@ readonly record struct MemberBinding
     // Как маппится финальное значение source member -> target member.
     public required Mapping Value { get; init; }
 
-    public required bool IsRequired{ get; init; }
+    public required bool IsRequired { get; init; }
     public required bool IsInitOnly { get; init; }
 }
 
-internal sealed record CollectionMapping : Mapping
+internal abstract record CollectionBaseMapping : Mapping
 {
-    public required TypeModel ElementTypeName { get; init; }
+    public required TypeModel ElementType { get; init; }
+    public required Mapping ElementMapping { get; init; }
+}
+
+internal sealed record CollectionMapping : CollectionBaseMapping
+{
     public required bool HasClearMethod { get; init; }
     public required bool HasAddMethod { get; init; }
     public required bool HasAddRangeMethod { get; init; }
 
-    public required Mapping ElementMapping { get; init; }
+}
 
+internal enum AggregateKind
+{
+    Count,
+    Any,
+    All,
+    Sum,
+    Average,
+    Max,
+    Min,
+    First,
+    Last,
+    FirstOrDefault,
+    LastOrDefault
+}
 
+internal sealed record AggregateMapping : CollectionBaseMapping
+{
+    public required AggregateKind Kind { get; init; }
+
+    public required SourcePath? ParameterSelector { get; init; }
+
+    public required Mapping? Mapping { get; init; }
 }

@@ -33,7 +33,8 @@ public class FusionMapper<TSource, TTarget>
             var targetType = typeof(TTarget);
             if (targetType.IsClass || Nullable.GetUnderlyingType(targetType) != null) return default!;
         }
-        return creator.Value(source);
+        creator ??= (Func<TSource, TTarget>)MappingBuilder.BuildCreationLambda(typeof(TSource), typeof(TTarget)).Compile();
+        return creator(source);
     }
 
     public static TTarget Map(TSource source, TTarget target)
@@ -43,18 +44,20 @@ public class FusionMapper<TSource, TTarget>
             return target;
         }
 
-        return assigner.Value(source, target);
+        assigner ??= (Func<TSource, TTarget, TTarget>)MappingBuilder.BuildAssignmentFuncLambda(typeof(TSource), typeof(TTarget)).Compile();
+        return assigner(source, target);
     }
 
     public static IQueryable<TTarget> Project(IQueryable<TSource> source)
     {
         ArgumentNullException.ThrowIfNull(source);
         var rewrittenSource = ExpressionRewriter.Rewrite(source);
-        return rewrittenSource.Select(projector.Value);
+        projector ??= (Expression<Func<TSource, TTarget>>)MappingBuilder.BuildCreationLambda(typeof(TSource), typeof(TTarget));
+        return rewrittenSource.Select(projector);
     }
 
-    private static readonly Lazy<Func<TSource, TTarget>> creator = new(() => (Func<TSource, TTarget>)MappingBuilder.BuildCreationLambda(typeof(TSource), typeof(TTarget)).Compile(), true);
-    private static readonly Lazy<Func<TSource, TTarget, TTarget>> assigner = new(() => (Func<TSource, TTarget, TTarget>)MappingBuilder.BuildAssignmentFuncLambda(typeof(TSource), typeof(TTarget)).Compile(), true);
-    private static readonly Lazy<Expression<Func<TSource, TTarget>>> projector = new(() => (Expression<Func<TSource, TTarget>>)MappingBuilder.BuildCreationLambda(typeof(TSource), typeof(TTarget)), true);
+    private static Func<TSource, TTarget>? creator = null;
+    private static Func<TSource, TTarget, TTarget>? assigner = null;
+    private static Expression<Func<TSource, TTarget>>? projector = null;
 }
 

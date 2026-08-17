@@ -9,8 +9,8 @@
 		<WarningsAsErrors>$(WarningsAsErrors);NU1605;Nullable</WarningsAsErrors>
 		<EmitCompilerGeneratedFiles>true</EmitCompilerGeneratedFiles>
 		<EnableFusionMapperInterceptor>true</EnableFusionMapperInterceptor>
-		<InterceptorsPreviewNamespaces Condition="EnableFusionMapperInterceptor!='false'">$(InterceptorsPreviewNamespaces);FusionMapper.SourceGenerator.Interceptors</InterceptorsPreviewNamespaces>
-		<InterceptorsNamespaces Condition="EnableFusionMapperInterceptor!='false'">$(InterceptorsNamespaces);FusionMapper.SourceGenerator.Interceptors</InterceptorsNamespaces>
+		<InterceptorsPreviewNamespaces Condition="EnableFusionMapperInterceptor!='false'">$(InterceptorsPreviewNamespaces);FusionMapper.SourceGenerator</InterceptorsPreviewNamespaces>
+		<InterceptorsNamespaces Condition="EnableFusionMapperInterceptor!='false'">$(InterceptorsNamespaces);FusionMapper.SourceGenerator</InterceptorsNamespaces>
 	</PropertyGroup>
 
 	<ItemGroup>

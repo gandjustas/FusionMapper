@@ -11,17 +11,14 @@ internal static class MappingEmitter
         ExpressionTree
     }
 
-    public static IEnumerable<string> Emit(Interceptable interceptable)
+    public static IEnumerable<string> Emit(CallKind kind, Mapping mapping)
     {
-        return interceptable.Kind switch
+        return kind switch
         {
-            CallKind.SourceTo => EmitCreateBody(interceptable.Mapping),
-            CallKind.SourceToExisting => EmitExistingBody(interceptable.Mapping),
-            CallKind.ProjectionTo => [EmitExpressionLambda(interceptable.Mapping)],
-            _ => throw new ArgumentOutOfRangeException(
-                nameof(interceptable),
-                interceptable.Kind,
-                "Unsupported interceptable kind.")
+            CallKind.SourceTo => EmitCreateBody(mapping),
+            CallKind.SourceToExisting => EmitExistingBody(mapping),
+            CallKind.ProjectionTo => [EmitExpressionLambda(mapping)],
+            _ => throw new InvalidOperationException()
         };
     }
 
@@ -292,7 +289,7 @@ internal static class MappingEmitter
         CollectionMapping mapping,
         string itemsExpression)
     {
-        var elementTypeName = mapping.ElementTypeName.Runtime;
+        var elementTypeName = mapping.ElementType.Runtime;
 
         if (IsArray(mapping.TargetType))
         {
@@ -325,7 +322,7 @@ internal static class MappingEmitter
             : $"global::System.Linq.Enumerable.Select(source, static __item => {itemMapping})";
 
         yield return
-            $"var __mappedItems = global::System.Linq.Enumerable.ToList<{mapping.ElementTypeName.Runtime}>({selectExpression});";
+            $"var __mappedItems = global::System.Linq.Enumerable.ToList<{mapping.ElementType.Runtime}>({selectExpression});";
 
         yield return "target.Clear();";
 
@@ -361,7 +358,7 @@ internal static class MappingEmitter
                 ? sourceExpression
                 : $"global::System.Linq.Enumerable.Select({sourceExpression}, static __item => {itemMapping})";
 
-            yield return $"var __mappedItems = global::System.Linq.Enumerable.ToList<{mapping.ElementTypeName.Runtime}>({itemsExpression});";
+            yield return $"var __mappedItems = global::System.Linq.Enumerable.ToList<{mapping.ElementType.Runtime}>({itemsExpression});";
             yield return $"var __result = new {targetType}();";
             yield return "__result.AddRange(__mappedItems);";
             yield return "return __result;";

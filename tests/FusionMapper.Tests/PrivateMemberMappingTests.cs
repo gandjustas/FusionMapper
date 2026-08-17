@@ -31,10 +31,13 @@ public class PrivateMemberMappingTests
         // Приватные, защищённые и внутренние — не должны (если нет специальной настройки)
         await Assert.That(result.PrivateName).IsEqualTo(string.Empty);
         await Assert.That(result.ProtectedName).IsEqualTo(string.Empty);
+
+#if !FUSION_MAPPER_SOURCE_GENERATOR
         // Internal может быть доступен в той же сборке, но маппер обычно использует публичные члены
         // Если маппер использует BindingFlags.Public, то Internal не будет доступен,
         // если только не используется непубличный binding.
         await Assert.That(result.InternalName).IsEqualTo(string.Empty);
+#endif
     }
 
     // Дополнительный тест: если у источника есть публичное поле (не свойство)

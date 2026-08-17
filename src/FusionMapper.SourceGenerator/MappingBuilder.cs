@@ -138,7 +138,7 @@ class MappingBuilder(Compilation compilation)
             SourceType = TypeModel.Create(source),
             TargetType = TypeModel.Create(target),
 
-            ElementTypeName = TypeModel.Create(targetElement),
+            ElementType = TypeModel.Create(targetElement),
             ElementMapping = elementMapping,
 
             HasClearMethod = HasInstanceMethod(target, "Clear", parameterCount: 0),
