@@ -10,24 +10,23 @@
 		<AssemblyName>$(PackageId)</AssemblyName>
 		<RootNamespace>$(PackageId)</RootNamespace>
 		<EnforceExtendedAnalyzerRules>true</EnforceExtendedAnalyzerRules>
-		<NoWarn>1701;1702;RS2008;RSEXPERIMENTAL002</NoWarn>
+		<NoWarn>1701;1702;RSEXPERIMENTAL002</NoWarn>
 		<WarningsAsErrors>$(WarningsAsErrors);NU1605;Nullable</WarningsAsErrors>
 		<IsPackable>true</IsPackable>
 	</PropertyGroup>
 
+	<PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Debug|AnyCPU'">
+		<NoWarn>$(NoWarn);RS2008</NoWarn>
+	</PropertyGroup>
 	<PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Release|AnyCPU'">
 		<NoWarn>$(NoWarn);NU5128</NoWarn>
 		<TreatWarningsAsErrors>True</TreatWarningsAsErrors>
 	</PropertyGroup>
 
 	<ItemGroup>
-		<PackageReference Include="Microsoft.Bcl.HashCode" Version="6.0.0" />
 		<PackageReference Include="Microsoft.CodeAnalysis.CSharp" Version="4.11.0" PrivateAssets="all" />
 		<PackageReference Include="Microsoft.CodeAnalysis.Analyzers" Version="3.11.0" PrivateAssets="all" />
-		<PackageReference Include="PolySharp" Version="1.16.0">
-			<PrivateAssets>all</PrivateAssets>
-			<IncludeAssets>runtime; build; native; contentfiles; analyzers; buildtransitive</IncludeAssets>
-		</PackageReference>
+		<PackageReference Include="PolySharp" Version="*" PrivateAssets="all" />
 	</ItemGroup>
 
 	<ItemGroup>
@@ -36,4 +35,10 @@
 		<None Include="$(PackageId).targets" Pack="true" PackagePath="build" Visible="true" />
 	</ItemGroup>
 
+
+	<ItemGroup>
+		<AssemblyAttribute Include="System.Runtime.CompilerServices.InternalsVisibleToAttribute">
+			<_Parameter1>$(PackageId).Tests</_Parameter1>
+		</AssemblyAttribute>
+	</ItemGroup>
 </Project>

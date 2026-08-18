@@ -8,6 +8,9 @@
 		<LangVersion>latest</LangVersion>
 		<WarningsAsErrors>$(WarningsAsErrors);NU1605;Nullable</WarningsAsErrors>
 		<EmitCompilerGeneratedFiles>true</EmitCompilerGeneratedFiles>
+		<ReportAnalyzer>true</ReportAnalyzer>
+		
+		
 		<EnableFusionMapperInterceptor>true</EnableFusionMapperInterceptor>
 		<InterceptorsPreviewNamespaces Condition="EnableFusionMapperInterceptor!='false'">$(InterceptorsPreviewNamespaces);FusionMapper.SourceGenerator</InterceptorsPreviewNamespaces>
 		<InterceptorsNamespaces Condition="EnableFusionMapperInterceptor!='false'">$(InterceptorsNamespaces);FusionMapper.SourceGenerator</InterceptorsNamespaces>

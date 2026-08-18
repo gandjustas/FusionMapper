@@ -136,7 +136,7 @@ public class ProjectionTests
                 .ToList()
         ).Throws<MappingException>();
     }
-#endif
+
 
     [Test]
     public async Task Project_Cyclic_Graph_Throws_By_Default()
@@ -166,4 +166,5 @@ public class ProjectionTests
                 .ToList()
         ).Throws<MappingException>();
     }
+#endif
 }

@@ -1,6 +1,4 @@
-﻿using System.Collections.Immutable;
-
-namespace FusionMapper.SourceGenerator;
+﻿namespace FusionMapper.SourceGenerator;
 
 internal abstract record Mapping
 {
@@ -40,14 +38,28 @@ internal enum AggregateKind
 internal sealed record AggregateMapping : Mapping
 {
     public required AggregateKind Kind { get; init; }
-
     public required TypeModel ElementType { get; init; }
 
     /// <summary>
-    /// Путь к свойству элемента коллекции, если агрегат имеет селектор.
-    /// Например: ItemsNameFirstOrDefault -> Selector = Name.
+    /// Старый селектор вида ItemsNameFirstOrDefault -> Name.
     /// </summary>
     public SourcePath? Selector { get; init; }
+
+    /// <summary>
+    /// Предикат для First/Last/FirstOrDefault/LastOrDefault.
+    /// Например: ItemsActiveFirstOrDefault -> Active.
+    /// </summary>
+    public SourcePath? Predicate { get; init; }
+
+    /// <summary>
+    /// Путь внутри элемента для пост-агрегатного выражения.
+    /// </summary>
+    public SourcePath? PostSource { get; init; }
+
+    /// <summary>
+    /// Маппинг пост-агрегатного выражения.
+    /// </summary>
+    public Mapping? PostMapping { get; init; }
 
     /// <summary>
     /// Маппинг элемента коллекции в целевой тип.
@@ -57,7 +69,6 @@ internal sealed record AggregateMapping : Mapping
 
     /// <summary>
     /// Маппинг результата агрегата в целевой тип.
-    /// Например, Count: int -> long, Any: bool -> bool.
     /// </summary>
     public Mapping? ResultMapping { get; init; }
 
@@ -73,28 +84,28 @@ internal sealed record ObjectMapping : Mapping
     /// Все допустимые конструкторы.
     /// Выбор конкретного конструктора делает Emitter.
     /// </summary>
-    public required ImmutableArray<ConstructorCandidate> Constructors { get; init; }
+    public required EquatableArray<ConstructorCandidate> Constructors { get; init; }
 
     /// <summary>
     /// Все члены target, которые Builder смог сопоставить с source.
     /// Emitter сам решает, какие из них использовать для создания,
     /// какие для обновления, какие пропустить.
     /// </summary>
-    public required ImmutableArray<MemberBinding> Members { get; init; }
+    public required EquatableArray<MemberBinding> Members { get; init; }
 
-    public required ImmutableArray<string> RequiredMemberNames { get; init; }
+    public required EquatableArray<string> RequiredMemberNames { get; init; }
 }
 
 readonly record struct ConstructorCandidate
 {
-    public required ImmutableArray<ConstructorParameter> Parameters { get; init; }
+    public required EquatableArray<ConstructorParameter> Parameters { get; init; }
 
     public required bool SetsRequiredMembers { get; init; }
 
     /// <summary>
     /// Имена required/обычных членов, которые закрываются параметрами конструктора.
     /// </summary>
-    public required ImmutableArray<string> AssignedMemberNames { get; init; }
+    public required EquatableArray<string> AssignedMemberNames { get; init; }
 }
 
 readonly record struct ConstructorParameter
@@ -112,9 +123,7 @@ readonly record struct ConstructorParameter
 
 readonly record struct SourcePath
 {
-    public required ImmutableArray<SourcePathSegment> Segments { get; init; }
-
-    public TypeModel Type => Segments[^1].Type;
+    public required EquatableArray<SourcePathSegment> Segments { get; init; }
 }
 
 readonly record struct SourcePathSegment

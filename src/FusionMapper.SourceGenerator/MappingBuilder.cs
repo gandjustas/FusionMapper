@@ -1,4 +1,5 @@
-﻿using System.Collections.Immutable;
+﻿using System.Collections.Concurrent;
+using System.Collections.Immutable;
 using System.Diagnostics.CodeAnalysis;
 using Microsoft.CodeAnalysis;
 using Microsoft.CodeAnalysis.CSharp;
@@ -8,53 +9,24 @@ namespace FusionMapper.SourceGenerator;
 class MappingBuilder(Compilation compilation)
 {
     private readonly Stack<(ITypeSymbol Source, ITypeSymbol Target)> path = new();
-    private readonly Dictionary<(TypeModel Source, TypeModel Target), Mapping> mappings = [];
-
-    internal static ImmutableDictionary<(TypeModel Source, TypeModel Target), Mapping> CreateMappings(
-        ImmutableArray<RawCandidate> candidates,
-        Compilation compilation,
-        CancellationToken ct)
-    {
-        var builder = new MappingBuilder(compilation);
-
-        foreach (var candidate in candidates)
-        {
-            ct.ThrowIfCancellationRequested();
-
-            if (candidate.SourceSymbol.IsAnonymousType || candidate.TargetSymbol.IsAnonymousType)
-                continue;
-
-            builder.AddMapping(candidate);
-        }
-
-        return builder.mappings.ToImmutableDictionary();
-    }
-
-    private void AddMapping(RawCandidate candidate)
-    {
-        var key = (candidate.Source, candidate.Target);
-
-        if (mappings.ContainsKey(key))
-            return;
-
-        mappings[key] = Build(candidate.SourceSymbol, candidate.TargetSymbol);
-    }
+    private readonly ConcurrentDictionary<ITypeSymbol, TypeModel> typeModelCache = new (SymbolEqualityComparer.IncludeNullability);
+    private readonly ConcurrentDictionary<(TypeModel Source, TypeModel Target), Mapping> mappingsCache = [];
 
 
     public Mapping Build(ITypeSymbol sourceSymbol, ITypeSymbol targetSymbol)
     {
-        var source = TypeModel.Create(sourceSymbol);
-        var target = TypeModel.Create(targetSymbol);
+        var source = typeModelCache.GetOrAdd(sourceSymbol, TypeModel.Create);
+        var target = typeModelCache.GetOrAdd(targetSymbol, TypeModel.Create);
 
         var key = (Source: source, Target: target);
 
-        if (mappings.TryGetValue(key, out var cachedMapping))
+        if (mappingsCache.TryGetValue(key, out var cachedMapping))
         {
             return cachedMapping;
         }
 
         var mapping = ResolveMapping(sourceSymbol, targetSymbol);
-        mappings[key] = mapping;
+        mappingsCache[key] = mapping;
         return mapping;
     }
 
@@ -115,15 +87,15 @@ class MappingBuilder(Compilation compilation)
             $"Cannot map '{source.ToDisplayString()}' to '{target.ToDisplayString()}'.");
     }
 
-    private static AssignMapping CreateAssignMapping(
+    private AssignMapping CreateAssignMapping(
     ITypeSymbol source,
     ITypeSymbol target,
     AssignmentKind kind)
     {
         return new AssignMapping
         {
-            SourceType = TypeModel.Create(source),
-            TargetType = TypeModel.Create(target),
+            SourceType = typeModelCache.GetOrAdd(source, TypeModel.Create),
+            TargetType = typeModelCache.GetOrAdd(target, TypeModel.Create),
             Kind = kind
         };
     }
@@ -138,9 +110,9 @@ class MappingBuilder(Compilation compilation)
 
         return new CollectionMapping
         {
-            SourceType = TypeModel.Create(source),
-            TargetType = TypeModel.Create(target),
-            ElementTypeName = TypeModel.Create(targetElement),
+            SourceType = typeModelCache.GetOrAdd(source, TypeModel.Create),
+            TargetType = typeModelCache.GetOrAdd(target, TypeModel.Create),
+            ElementTypeName = typeModelCache.GetOrAdd(targetElement, TypeModel.Create),
             ElementMapping = elementMapping,
             Capabilities = BuildCollectionCapabilities(target, targetElement)
         };
@@ -273,8 +245,8 @@ class MappingBuilder(Compilation compilation)
 
         return new ObjectMapping
         {
-            SourceType = TypeModel.Create(source),
-            TargetType = TypeModel.Create(target),
+            SourceType = typeModelCache.GetOrAdd(source, TypeModel.Create),
+            TargetType = typeModelCache.GetOrAdd(target, TypeModel.Create),
             Constructors = constructors,
             Members = bindings.ToImmutable(),
             RequiredMemberNames = requiredMembers
@@ -372,11 +344,11 @@ class MappingBuilder(Compilation compilation)
     }
 
     private bool TryResolveAggregate(
-    ITypeSymbol sourceRoot,
-    string targetMemberName,
-    ITypeSymbol targetType,
-    out ResolvedPath collectionPath,
-    out AggregateMapping mapping)
+        ITypeSymbol sourceRoot,
+        string targetMemberName,
+        ITypeSymbol targetType,
+        out ResolvedPath collectionPath,
+        out AggregateMapping mapping)
     {
         collectionPath = default!;
         mapping = default!;
@@ -385,60 +357,149 @@ class MappingBuilder(Compilation compilation)
 
         foreach (var (kind, suffix) in AggregateSuffixes)
         {
-            if (!cleanName.EndsWith(suffix, StringComparison.OrdinalIgnoreCase))
+            // Старый вариант: ItemsCount, ItemsValueSum, ItemsNameFirstOrDefault
+            if (cleanName.EndsWith(suffix, StringComparison.OrdinalIgnoreCase))
             {
-                continue;
+                var prefix = cleanName[..^suffix.Length].TrimEnd('_');
+
+                if (prefix.Length > 0 &&
+                    TryResolveAggregateCore(
+                        kind,
+                        sourceRoot,
+                        prefix,
+                        trailingSelectorSuffix: string.Empty,
+                        targetType,
+                        out collectionPath,
+                        out mapping))
+                {
+                    return true;
+                }
             }
 
-            var prefix = cleanName[..^suffix.Length].TrimEnd('_');
+            // Новый вариант: CustomerAddressesFirstOrDefaultCity
+            var searchStart = 0;
 
-            if (prefix.Length == 0)
+            while (searchStart < cleanName.Length)
             {
-                continue;
-            }
+                var index = cleanName.IndexOf(
+                    suffix,
+                    searchStart,
+                    StringComparison.OrdinalIgnoreCase);
 
-            if (!TryResolveCollectionPrefix(
-                    sourceRoot,
-                    prefix,
-                    out var resolvedCollectionPath,
-                    out var selectorSuffix))
-            {
-                continue;
-            }
+                if (index < 0)
+                {
+                    break;
+                }
 
-            if (!IsCollection(resolvedCollectionPath.FinalType, out var elementType))
-            {
-                continue;
-            }
+                searchStart = index + suffix.Length;
 
-            ResolvedPath? selectorPath = null;
-
-            if (selectorSuffix.Length > 0)
-            {
-                if (!TryResolveSourcePath(elementType!, selectorSuffix, out var resolvedSelector))
+                // Суффикс не должен быть в самом начале или в самом конце.
+                // Конец уже обработан выше.
+                if (index == 0 || index + suffix.Length >= cleanName.Length)
                 {
                     continue;
                 }
 
-                selectorPath = resolvedSelector;
-            }
+                var prefix = cleanName[..index].TrimEnd('_');
+                var trailingSelector = cleanName[(index + suffix.Length)..].TrimStart('_');
 
-            if (!TryBuildAggregateMapping(
-                    kind,
-                    resolvedCollectionPath,
-                    elementType!,
-                    selectorPath,
-                    targetType,
-                    out mapping))
-            {
-                continue;
-            }
+                if (prefix.Length == 0 || trailingSelector.Length == 0)
+                {
+                    continue;
+                }
 
-            collectionPath = resolvedCollectionPath;
-            return true;
+                if (TryResolveAggregateCore(
+                        kind,
+                        sourceRoot,
+                        prefix,
+                        trailingSelector,
+                        targetType,
+                        out collectionPath,
+                        out mapping))
+                {
+                    return true;
+                }
+            }
         }
 
         return false;
+    }
+
+    private bool TryResolveAggregateCore(
+    AggregateKind kind,
+    ITypeSymbol sourceRoot,
+    string prefix,
+    string trailingSelectorSuffix,
+    ITypeSymbol targetType,
+    out ResolvedPath collectionPath,
+    out AggregateMapping mapping)
+    {
+        collectionPath = default!;
+        mapping = default!;
+
+        if (!TryResolveCollectionPrefix(
+                sourceRoot,
+                prefix,
+                out var resolvedCollectionPath,
+                out var selectorSuffix))
+        {
+            return false;
+        }
+
+        if (!IsCollection(resolvedCollectionPath.FinalType, out var elementType))
+        {
+            return false;
+        }
+
+        ResolvedPath? selectorPath = null;
+
+        if (selectorSuffix.Length > 0 || trailingSelectorSuffix.Length > 0)
+        {
+            IEnumerable<string> candidates = (selectorSuffix.Length, trailingSelectorSuffix.Length) switch
+            {
+                (0, _) => [trailingSelectorSuffix],
+                (_, 0) => [selectorSuffix],
+                _ =>
+                [
+                    selectorSuffix + trailingSelectorSuffix,
+                trailingSelectorSuffix,
+                selectorSuffix
+                ]
+            };
+
+            foreach (var candidate in candidates)
+            {
+                if (candidate.Length == 0)
+                {
+                    continue;
+                }
+
+                if (TryResolveSourcePath(elementType!, candidate, out var resolvedSelector))
+                {
+                    selectorPath = resolvedSelector;
+                    break;
+                }
+            }
+
+            if (selectorPath is null)
+            {
+                return false;
+            }
+        }
+
+        if (!TryBuildAggregateMapping(
+                kind,
+                resolvedCollectionPath,
+                elementType!,
+                selectorPath,
+                targetType,
+                out mapping))
+        {
+            return false;
+        }
+
+        collectionPath = resolvedCollectionPath;
+        return true;
     }
 
     private bool TryResolveCollectionPrefix(
@@ -523,10 +584,9 @@ class MappingBuilder(Compilation compilation)
     out AggregateMapping mapping)
     {
         mapping = default!;
-
-        var sourceModel = TypeModel.Create(collectionPath.FinalType);
-        var targetModel = TypeModel.Create(targetType);
-        var elementModel = TypeModel.Create(elementType);
+        var sourceModel = typeModelCache.GetOrAdd(collectionPath.FinalType, TypeModel.Create);
+        var targetModel = typeModelCache.GetOrAdd(targetType, TypeModel.Create);
+        var elementModel = typeModelCache.GetOrAdd(elementType, TypeModel.Create);
 
         var hasCountProperty = collectionPath.FinalType
             .GetMembers("Count")
@@ -674,6 +734,106 @@ class MappingBuilder(Compilation compilation)
         }
     }
 
+    private bool TryResolveAggregateWithPostExpression(
+    AggregateKind kind,
+    ITypeSymbol sourceRoot,
+    string collectionPrefix,
+    string trailingExpression,
+    ITypeSymbol targetType,
+    out ResolvedPath collectionPath,
+    out AggregateMapping mapping)
+    {
+        collectionPath = default!;
+        mapping = default!;
+
+        if (kind is not (
+            AggregateKind.First or
+            AggregateKind.Last or
+            AggregateKind.FirstOrDefault or
+            AggregateKind.LastOrDefault))
+        {
+            return false;
+        }
+
+        if (!TryResolveCollectionPrefix(
+                sourceRoot,
+                collectionPrefix,
+                out var resolvedCollectionPath,
+                out var predicateSuffix))
+        {
+            return false;
+        }
+
+        if (!IsCollection(resolvedCollectionPath.FinalType, out var elementType))
+        {
+            return false;
+        }
+
+        SourcePath? predicate = null;
+
+        if (predicateSuffix.Length > 0)
+        {
+            if (!TryResolveSourcePath(elementType!, predicateSuffix, out var predicatePath))
+            {
+                return false;
+            }
+
+            // Предикат обязан быть bool.
+            // Для bool? можно позже расширить до x.IsPrimary == true.
+            if (predicatePath.FinalType.SpecialType != SpecialType.System_Boolean)
+            {
+                return false;
+            }
+
+            predicate = MaterializePath(predicatePath);
+        }
+
+        if (!TryResolveMemberValue(
+                elementType!,
+                trailingExpression,
+                targetType,
+                out var postPath,
+                out var postMapping))
+        {
+            return false;
+        }
+
+        collectionPath = resolvedCollectionPath;
+
+        mapping = new AggregateMapping
+        {
+            Kind = kind,
+            SourceType = typeModelCache.GetOrAdd(resolvedCollectionPath.FinalType, TypeModel.Create),
+            TargetType = typeModelCache.GetOrAdd(targetType, TypeModel.Create),
+            ElementType = typeModelCache.GetOrAdd(elementType!, TypeModel.Create),
+
+            Selector = null,
+            Predicate = predicate,
+
+            PostSource = MaterializePath(postPath),
+            PostMapping = postMapping,
+
+            ElementMapping = null,
+            ResultMapping = null,
+
+            SourceHasCountProperty = HasCountProperty(resolvedCollectionPath.FinalType)
+        };
+
+        return true;
+    }
+
+    private bool HasCountProperty(ITypeSymbol type)
+    {
+        return type
+            .GetMembers("Count")
+            .OfType<IPropertySymbol>()
+            .Any(p =>
+                !p.IsStatic &&
+                p.GetMethod is not null &&
+                IsAccessibleFromGeneratedCode(p) &&
+                IsAccessibleFromGeneratedCode(p.GetMethod));
+    }
+
     private ImmutableArray<ConstructorCandidate> BuildConstructorCandidates(
     ITypeSymbol source,
     INamedTypeSymbol target,
@@ -702,7 +862,7 @@ class MappingBuilder(Compilation compilation)
                 {
                     parameters.Add(new ConstructorParameter
                     {
-                        ParameterType = TypeModel.Create(parameter.Type),
+                        ParameterType = typeModelCache.GetOrAdd(parameter.Type, TypeModel.Create),
                         IsMapped = true,
                         CanUseDefault = false,
                         Source = MaterializePath(sourcePath),
@@ -717,7 +877,7 @@ class MappingBuilder(Compilation compilation)
                 {
                     parameters.Add(new ConstructorParameter
                     {
-                        ParameterType = TypeModel.Create(parameter.Type),
+                        ParameterType = typeModelCache.GetOrAdd(parameter.Type, TypeModel.Create),
                         IsMapped = false,
                         CanUseDefault = true,
                         Source = null,
@@ -774,9 +934,9 @@ class MappingBuilder(Compilation compilation)
         {
             result.Add(new ConstructorCandidate
             {
-                Parameters = [],
+                Parameters = ImmutableArray.Create<ConstructorParameter>(),
                 SetsRequiredMembers = false,
-                AssignedMemberNames = []
+                AssignedMemberNames = ImmutableArray.Create<string>()
             });
         }
 
@@ -793,7 +953,7 @@ class MappingBuilder(Compilation compilation)
             mapping = ResolveMapping(source, target);
             return true;
         }
-        catch (MappingGenerationException)
+        catch (MappingGenerationException ex) when (ex is not RecursiveMappingGenerationException)
         {
             mapping = null;
             return false;
@@ -868,122 +1028,158 @@ class MappingBuilder(Compilation compilation)
         return false;
     }
 
-    private static SourcePath MaterializePath(ResolvedPath path)
+    private SourcePath MaterializePath(ResolvedPath path)
     {
         return new SourcePath
         {
-            Segments = [.. path.Segments
+            Segments = path.Segments
                 .Select(segment => new SourcePathSegment
                 {
                     MemberName = segment.Name,
-                    Type = TypeModel.Create(segment.Type)
-                })]
+                    Type = typeModelCache.GetOrAdd(segment.Type, TypeModel.Create)
+                }).ToImmutableArray()
         };
     }
 
-    private IEnumerable<ReadableMember> GetReadableMembers(ITypeSymbol type)
+    private static IEnumerable<ReadableMember> GetReadableMembers(ITypeSymbol type)
     {
-        foreach (var property in type.GetMembers().OfType<IPropertySymbol>())
+        var seen = new HashSet<string>(StringComparer.Ordinal);
+
+        foreach (var currentType in GetTypeAndBaseTypes(type))
         {
-            if (property.IsStatic || property.Parameters.Length > 0 || property.GetMethod is null)
+            foreach (var property in currentType.GetMembers().OfType<IPropertySymbol>())
             {
-                continue;
+                if (property.IsStatic || property.Parameters.Length > 0 || property.GetMethod is null)
+                {
+                    continue;
+                }
+
+                if (!IsAccessibleFromGeneratedCode(property) ||
+                    !IsAccessibleFromGeneratedCode(property.GetMethod))
+                {
+                    continue;
+                }
+
+                if (!seen.Add(property.Name))
+                {
+                    continue;
+                }
+
+                yield return new ReadableMember(property.Name, property.Type);
             }
 
-            if (!IsAccessibleFromGeneratedCode(property) || !IsAccessibleFromGeneratedCode(property.GetMethod))
+            foreach (var field in currentType.GetMembers().OfType<IFieldSymbol>())
             {
-                continue;
+                if (field.IsStatic)
+                {
+                    continue;
+                }
+
+                if (!IsAccessibleFromGeneratedCode(field))
+                {
+                    continue;
+                }
+
+                if (!seen.Add(field.Name))
+                {
+                    continue;
+                }
+
+                yield return new ReadableMember(field.Name, field.Type);
             }
-
-            yield return new ReadableMember(property.Name, property.Type);
-        }
-
-        foreach (var field in type.GetMembers().OfType<IFieldSymbol>())
-        {
-            if (field.IsStatic)
-            {
-                continue;
-            }
-
-            if (!IsAccessibleFromGeneratedCode(field))
-            {
-                continue;
-            }
-
-            yield return new ReadableMember(field.Name, field.Type);
         }
     }
 
     private IEnumerable<TargetMemberInfo> GetTargetMembers(INamedTypeSymbol type)
     {
-        foreach (var property in type.GetMembers().OfType<IPropertySymbol>())
+        var seen = new HashSet<string>(StringComparer.Ordinal);
+
+        foreach (var currentType in GetTypeAndBaseTypes(type))
         {
-            if (property.IsStatic || property.Parameters.Length > 0)
+            foreach (var property in currentType.GetMembers().OfType<IPropertySymbol>())
             {
-                continue;
+                if (property.IsStatic || property.Parameters.Length > 0)
+                {
+                    continue;
+                }
+
+                var canRead = property.GetMethod is not null &&
+                    IsAccessibleFromGeneratedCode(property) &&
+                    IsAccessibleFromGeneratedCode(property.GetMethod);
+
+                var canWrite = property.SetMethod is not null &&
+                    IsAccessibleFromGeneratedCode(property) &&
+                    IsAccessibleFromGeneratedCode(property.SetMethod);
+
+                if (!canRead && !canWrite)
+                {
+                    continue;
+                }
+
+                if (!seen.Add(property.Name))
+                {
+                    continue;
+                }
+
+                yield return new TargetMemberInfo(
+                    property.Name,
+                    property.Type,
+                    property.IsRequired,
+                    IsInitOnly(property),
+                    canRead,
+                    canWrite,
+                    property.Type.IsValueType);
             }
 
-            var canRead = property.GetMethod is not null &&
-                IsAccessibleFromGeneratedCode(property) &&
-                IsAccessibleFromGeneratedCode(property.GetMethod);
-
-            var canWrite = property.SetMethod is not null &&
-                IsAccessibleFromGeneratedCode(property) &&
-                IsAccessibleFromGeneratedCode(property.SetMethod);
-
-            if (!canRead && !canWrite)
+            foreach (var field in currentType.GetMembers().OfType<IFieldSymbol>())
             {
-                continue;
+                if (field.IsStatic || field.IsConst)
+                {
+                    continue;
+                }
+
+                if (!IsAccessibleFromGeneratedCode(field))
+                {
+                    continue;
+                }
+
+                if (!seen.Add(field.Name))
+                {
+                    continue;
+                }
+
+                yield return new TargetMemberInfo(
+                    field.Name,
+                    field.Type,
+                    field.IsRequired,
+                    IsInitOnly: false,
+                    CanRead: true,
+                    CanWrite: !field.IsReadOnly,
+                    field.Type.IsValueType);
             }
-
-            yield return new TargetMemberInfo(
-                property.Name,
-                property.Type,
-                property.IsRequired,
-                IsInitOnly(property),
-                canRead,
-                canWrite,
-                property.Type.IsValueType);
-        }
-
-        foreach (var field in type.GetMembers().OfType<IFieldSymbol>())
-        {
-            if (field.IsStatic || field.IsConst)
-            {
-                continue;
-            }
-
-            if (!IsAccessibleFromGeneratedCode(field))
-            {
-                continue;
-            }
-
-            yield return new TargetMemberInfo(
-                field.Name,
-                field.Type,
-                field.IsRequired,
-                IsInitOnly: false,
-                CanRead: true,
-                CanWrite: !field.IsReadOnly,
-                field.Type.IsValueType);
         }
     }
 
     private static IEnumerable<string> GetRequiredMemberNames(INamedTypeSymbol type)
     {
-        foreach (var property in type.GetMembers().OfType<IPropertySymbol>())
-        {
-            if (property.IsRequired)
-            {
-                yield return property.Name;
-            }
-        }
+        var seen = new HashSet<string>(StringComparer.Ordinal);
 
-        foreach (var field in type.GetMembers().OfType<IFieldSymbol>())
+        foreach (var currentType in GetTypeAndBaseTypes(type))
         {
-            if (field.IsRequired)
+            foreach (var property in currentType.GetMembers().OfType<IPropertySymbol>())
             {
-                yield return field.Name;
+                if (property.IsRequired && seen.Add(property.Name))
+                {
+                    yield return property.Name;
+                }
+            }
+
+            foreach (var field in currentType.GetMembers().OfType<IFieldSymbol>())
+            {
+                if (field.IsRequired && seen.Add(field.Name))
+                {
+                    yield return field.Name;
+                }
             }
         }
     }
@@ -1016,10 +1212,7 @@ class MappingBuilder(Compilation compilation)
         return false;
     }
 
-    private bool IsAccessibleFromGeneratedCode(ISymbol symbol)
-    {
-        return symbol.DeclaredAccessibility == Accessibility.Public;
-    }
+    private static bool IsAccessibleFromGeneratedCode(ISymbol symbol) => symbol.DeclaredAccessibility == Accessibility.Public;
 
     private bool IsCollection(
     ITypeSymbol type,
@@ -1068,7 +1261,7 @@ class MappingBuilder(Compilation compilation)
             if (SymbolEqualityComparer.Default.Equals(Source, source)
                 && SymbolEqualityComparer.Default.Equals(Target, target))
             {
-                throw new MappingGenerationException(
+                throw new RecursiveMappingGenerationException(
                     $"Recursive mapping detected between '{source.ToDisplayString()}' and '{target.ToDisplayString()}'.");
             }
         }
@@ -1123,6 +1316,14 @@ class MappingBuilder(Compilation compilation)
             : type;
     }
 
+    private static IEnumerable<ITypeSymbol> GetTypeAndBaseTypes(ITypeSymbol type)
+    {
+        for (var current = type; current is not null; current = current.BaseType)
+        {
+            yield return current;
+        }
+    }
+
     private static readonly (AggregateKind Kind, string Suffix)[] AggregateSuffixes =
 [
         (AggregateKind.FirstOrDefault, nameof(AggregateKind.FirstOrDefault)),
@@ -1139,7 +1340,6 @@ class MappingBuilder(Compilation compilation)
     ];
 
     private sealed record ReadableMember(string Name, ITypeSymbol Type);
-    private sealed record WritableMember(string Name, ITypeSymbol Type, bool IsRequired, bool IsInitOnly);
 
     private sealed record ResolvedPath(ImmutableArray<ResolvedSegment> Segments, ITypeSymbol FinalType);
 
@@ -1155,6 +1355,6 @@ class MappingBuilder(Compilation compilation)
         bool IsValueType);
 }
 
-internal sealed class MappingGenerationException(string message) : Exception(message)
-{
-}
+internal sealed class RecursiveMappingGenerationException(string message) : MappingGenerationException(message) { }
+
+internal class MappingGenerationException(string message) : Exception(message) { }

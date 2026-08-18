@@ -1,4 +1,6 @@
-﻿using System.Text;
+﻿using System.Collections.Immutable;
+using System.Runtime.CompilerServices;
+using System.Text;
 using Microsoft.CodeAnalysis;
 using Microsoft.CodeAnalysis.CSharp;
 using Microsoft.CodeAnalysis.CSharp.Syntax;
@@ -10,26 +12,37 @@ namespace FusionMapper.SourceGenerator;
 [Generator(LanguageNames.CSharp)]
 public sealed class FusionMapperInterceptorGenerator : IIncrementalGenerator
 {
+
+    static readonly ConditionalWeakTable<Compilation, MappingBuilder> cache = new ();
+
     public const string FusionSourceType = "FusionSource";
     public const string FusionProjectionType = "FusionProjection";
     public static readonly DiagnosticDescriptor IncompatibleMappingRule = new(
         id: "FMAP001",
-        title: "FusionMapper cannot generate mapping",
+        title: "Cannot generate mapping",
         messageFormat: "Cannot generate mapping from '{0}' to '{1}': {2}",
         category: "FusionMapper",
         defaultSeverity: DiagnosticSeverity.Error,
         isEnabledByDefault: true);
 
-    public static readonly DiagnosticDescriptor AnonymousSourceRule = new(
+    public static readonly DiagnosticDescriptor UnsupportedInEpressionTree = new(
         id: "FMAP002",
-        title: "FusionMapper cannot intercept anonymous source",
-        messageFormat: "Cannot generate an interceptor for FusionMapper call because the source or target type is anonymous",
+        title: "Unsupported mapping inside expression tree",
+        messageFormat: "Unsupported Map<{0}>().To<{1}>(existing) inside expression tree",
+        category: "FusionMapper",
+        defaultSeverity: DiagnosticSeverity.Error,
+        isEnabledByDefault: true);
+
+    public static readonly DiagnosticDescriptor AnonymousSourceRule = new(
+        id: "FMAP003",
+        title: "Cannot generate mapper for anonymous source",
+        messageFormat: "Cannot generate an mapper because the source type is anonymous",
         category: "FusionMapper",
         defaultSeverity: DiagnosticSeverity.Warning,
         isEnabledByDefault: true);
 
     private static readonly DiagnosticDescriptor AccessorFieldNotResolvedRule = new(
-        id: "FMAP003",
+        id: "FMAP004",
         title: "FusionMapper cannot resolve backing field",
         messageFormat: "Cannot resolve backing field for '{0}'. Using fallback field name '{1}'.",
         category: "FusionMapper",
@@ -39,69 +52,47 @@ public sealed class FusionMapperInterceptorGenerator : IIncrementalGenerator
 
     public void Initialize(IncrementalGeneratorInitializationContext context)
     {
-        var interceptionEnabledSetting = context.AnalyzerConfigOptionsProvider
-            .Select((x, _) =>
-                x.GlobalOptions.TryGetValue("build_property.EnableFusionMapperInterceptor", out var enableSwitch)
-                && !enableSwitch.Equals("false", StringComparison.Ordinal))
-            .WithTrackingName(TrackingNames.InterceptorsIsEnabled);
+        var candidates = context.SyntaxProvider
+            .CreateSyntaxProvider(IsCandidate, Transform)
+            .Where(static c => c.HasValue)
+            .Select(static (c, _) => c!.Value)
+            .WithTrackingName(TrackingNames.RawCandidates);
+
+        // Report all diagnostics
+        var anonymousLocations = candidates
+            .SelectMany(static (c, _) => c.Diagnostics.AsImmutableArray());
+
+        context.RegisterImplementationSourceOutput(anonymousLocations, static (spc, diagnostic) =>
+        {
+            spc.ReportDiagnostic(Diagnostic.Create(diagnostic.Descriptor, diagnostic.Location, diagnostic.MessageArgs));
+        });
+
+        var mapped = candidates
+            .Where(static c => c.Source is { IsAnonymous: false } && c.Target is { IsAnonymous: false } && c.MappingCode.HasValue)
+            .Select(static (c, _) => new Mapped(c.Kind, c.Source!, c.Target!, c.MappingCode!.Value))
+            .Collect()
+            .WithTrackingName(TrackingNames.Mapped);
 
         var csharpSufficient = context.CompilationProvider
             .Select((x, _) => x is CSharpCompilation { LanguageVersion: LanguageVersion.Default or >= LanguageVersion.CSharp12 })
             .WithTrackingName(TrackingNames.CSharpVersion);
 
-        var interceptionEnabled = interceptionEnabledSetting.Combine(csharpSufficient).Select((t, _) => t.Left && t.Right);
-
-        var rawCandidates = context.SyntaxProvider
-            .CreateSyntaxProvider(IsCandidate, Transform)
-            .Combine(interceptionEnabled)
-            .Where(static c => c.Right && c.Left is not null)
-            .Select(static (c, _) => c.Left!.Value)
-            .WithTrackingName(TrackingNames.RawCandidates);
-
-        // Anonymous warnings
-        var anonymousLocations = rawCandidates
-            .Where(static c => c.SourceSymbol.IsAnonymousType || c.TargetSymbol.IsAnonymousType)
-            .Select(static (c, _) => c.Location);
-
-        context.RegisterImplementationSourceOutput(anonymousLocations, static (spc, location) =>
+        context.RegisterImplementationSourceOutput(mapped.Combine(csharpSufficient), static (spc, input) =>
         {
-            spc.ReportDiagnostic(Diagnostic.Create(AnonymousSourceRule, location));
-        });
+            var (candidates, csharpSufficient) = input;
+            if (!csharpSufficient) return;
+            if (candidates.Length == 0) return;
 
-
-        var builder = context.CompilationProvider.Select(static (compilation, ct) => new MappingBuilder(compilation));
-        var candidates = rawCandidates
-            .Where(static c => !c.SourceSymbol.IsAnonymousType && !c.TargetSymbol.IsAnonymousType)
-            .Combine(builder)
-            .Select(MapCandidates)
-            .WithTrackingName(TrackingNames.Candidates);
-
-        var failed = candidates
-            .Where(static c => c is MappingFailed)
-            .Select(static (c, _) => (MappingFailed)c);
-
-        context.RegisterImplementationSourceOutput(failed, static (spc, fail) =>
-        {
-            spc.ReportDiagnostic(Diagnostic.Create(
-                IncompatibleMappingRule,
-                fail.Location,
-                fail.Source.FullName,
-                fail.Target.FullName,
-                fail.Exception.Message));
-        });
-
-        var mapped = candidates
-            .Where(static c => c is Mapped)
-            .Select(static (c, _) => (Mapped)c)
-            .Collect();
-
-        context.RegisterSourceOutput(mapped, static (spc, input) =>
-        {
-            if (input.Length == 0) return;
-            var source = SourceEmmiter.EmitMappers(spc, input);
+            var source = SourceEmmiter.EmitMappers([.. candidates.Distinct()]);
             spc.AddSource("FusionMapper.g.cs", SourceText.From(source, Encoding.UTF8));
+
         });
 
+        var initialized = candidates
+            .Where(static c => c.Source is { IsAnonymous: false } && c.Target is { IsAnonymous: false } && c.MappingCode.HasValue)
+            .Select(static (c, _) => new Initialized(c.Kind, c.Source!, c.Target!, c.IsInsideExpressionTree))
+            .Collect()
+            .WithTrackingName(TrackingNames.Initialized);
 
         IncrementalValueProvider<int> targetFrameworkProvider = context.AnalyzerConfigOptionsProvider
             .Select((options, _) =>
@@ -116,91 +107,73 @@ public sealed class FusionMapperInterceptorGenerator : IIncrementalGenerator
             })
             .WithTrackingName(TrackingNames.DotnetVersion);
 
+
+
+        context.RegisterImplementationSourceOutput(initialized.Combine(csharpSufficient).Combine(targetFrameworkProvider), static (spc, input) =>
+        {
+            var ((candidates, csharpSufficient), dotnetVersion) = input;
+            if (!csharpSufficient) return;
+            if (candidates.Length == 0) return;
+
+            var initalizerSource = SourceEmmiter.EmitInitializer(candidates, dotnetVersion);
+            spc.AddSource("FusionMapper.Initializer.g.cs", SourceText.From(initalizerSource, Encoding.UTF8));
+
+        });
+
+
+        var interceptionEnabledSetting = context.AnalyzerConfigOptionsProvider
+            .Select((x, _) =>
+                x.GlobalOptions.TryGetValue("build_property.EnableFusionMapperInterceptor", out var enableSwitch)
+                && !enableSwitch.Equals("false", StringComparison.Ordinal))
+            .WithTrackingName(TrackingNames.InterceptorsIsEnabled);
+
+
+        var interceptionEnabled = interceptionEnabledSetting
+                .Combine(csharpSufficient)
+                .Combine(targetFrameworkProvider)
+                .Select((t, _) => t.Left.Left && t.Left.Right && t.Right >= 9);
+
+        var interceptable = candidates
+            .Where(static c => c.Source is { IsAnonymous: false } && c.Target is { IsAnonymous: false } && c.Interceptable is not null && !c.IsInsideExpressionTree)
+            .Select(static (c, _) => new Interceptable(c.Kind, c.Source!, c.Target!, c.Interceptable!))
+            .Collect()
+            .WithTrackingName(TrackingNames.Intercepted);
+
+
         var accessorFields =
             context.CompilationProvider
             .Select(static (compilation, ct) => FusionAccessorMetadata.Resolve(compilation, ct))
             .WithTrackingName(TrackingNames.AccessorFields);
 
 
-        context.RegisterSourceOutput(mapped.Combine(targetFrameworkProvider).Combine(accessorFields),
+        context.RegisterImplementationSourceOutput(interceptable.Combine(interceptionEnabled).Combine(accessorFields),
         static (spc, input) =>
         {
-            var ((candidates, dotnetVersion), fields) = input;
-
+            var ((candidates, enabled),  fields) = input;
+            if (!enabled) return;
             if (candidates.Length == 0) return;
 
-            var initalizerSource = SourceEmmiter.EmitInitializer(candidates, dotnetVersion);
-            spc.AddSource("FusionMapper.Initializer.g.cs", SourceText.From(initalizerSource, Encoding.UTF8));
-
-
-            if (dotnetVersion >= 9)
+            if (!fields.SourceValueFieldResolved)
             {
-                if (!fields.SourceValueFieldResolved)
-                {
-                    spc.ReportDiagnostic(Diagnostic.Create(
-                        AccessorFieldNotResolvedRule,
-                        Location.None,
-                        "FusionMapper.FusionSource<T>",
-                        fields.SourceValueField));
-                }
-
-                if (!fields.ProjectionValueFieldResolved)
-                {
-                    spc.ReportDiagnostic(Diagnostic.Create(
-                        AccessorFieldNotResolvedRule,
-                        Location.None,
-                        "FusionMapper.FusionProjection<T>",
-                        fields.ProjectionValueField));
-                }
-
-                var interceptorStore = SourceEmmiter.EmitInterceptors(candidates.OfType<Interceptable>(), fields);
-                spc.AddSource("FusionMapper.Interceptors.g.cs", SourceText.From(interceptorStore, Encoding.UTF8));
+                spc.ReportDiagnostic(Diagnostic.Create(
+                    AccessorFieldNotResolvedRule,
+                    Location.None,
+                    "FusionMapper.FusionSource<T>",
+                    fields.SourceValueField));
             }
+
+            if (!fields.ProjectionValueFieldResolved)
+            {
+                spc.ReportDiagnostic(Diagnostic.Create(
+                    AccessorFieldNotResolvedRule,
+                    Location.None,
+                    "FusionMapper.FusionProjection<T>",
+                    fields.ProjectionValueField));
+            }
+
+            var interceptorStore = SourceEmmiter.EmitInterceptors(candidates, fields);
+            spc.AddSource("FusionMapper.Interceptors.g.cs", SourceText.From(interceptorStore, Encoding.UTF8));
         });
-    }
-
-    private Candidate MapCandidates((RawCandidate Left, MappingBuilder Right) tuple, CancellationToken token)
-    {
-        var (candidate, builder) = tuple;
-        try
-        {
-            var mapping = builder.Build(candidate.SourceSymbol, candidate.TargetSymbol);
-            if (candidate.IsInsideExpressionTree)
-            {
-                return new Mapped
-                {
-                    Location = candidate.Location,
-                    Kind = candidate.Kind,
-                    Source = candidate.Source,
-                    Target = candidate.Target,
-                    Mapping = mapping,
-                    IsInsideExpressionTree = true
-                };
-            }
-            else
-            {
-                return new Interceptable
-                {
-                    Location = candidate.Location,
-                    InterceptableLocation = candidate.Interceptable,
-                    Kind = candidate.Kind,
-                    Source = candidate.Source,
-                    Target = candidate.Target,
-                    Mapping = mapping
-                };
-            }
-        }
-        catch (Exception ex)
-        {
-            return new MappingFailed
-            {
-                Kind = candidate.Kind,
-                Location = candidate.Location,
-                Source = candidate.Source,
-                Target = candidate.Target,
-                Exception = ex
-            };
-        }
     }
 
     private static bool IsCandidate(SyntaxNode node, CancellationToken ct) =>
@@ -228,7 +201,6 @@ public sealed class FusionMapperInterceptorGenerator : IIncrementalGenerator
             }
             && (source is { Name: FusionSourceType } || parameters is { Length: 0 })
             && targetOperation.Instance?.Type is INamedTypeSymbol type
-            && ctx.SemanticModel.GetInterceptableLocation(invocation) is { } location
             )
         {
             CallKind kind;
@@ -263,15 +235,61 @@ public sealed class FusionMapperInterceptorGenerator : IIncrementalGenerator
             if (IsUnsupported(sourceType) || IsUnsupported(targetType))
                 return null;
 
-            return new(
-                ctx.Node.GetLocation(),
-                location,
-                kind,
-                sourceType,
-                targetType,
-                TypeModel.Create(sourceType),
-                TypeModel.Create(targetType),
-                IsInsideExpressionTree(ctx.SemanticModel, invocation, ct));
+            var location = ctx.Node.GetLocation();
+            //var span = location.GetLineSpan();
+            //var mappedSpan = location.GetMappedLineSpan();
+            //location = Location.Create(span.Path, location.SourceSpan, span.Span, mappedSpan.Path, mappedSpan.Span);
+
+            var isInsideExpresionTree = IsInsideExpressionTree(ctx.SemanticModel, invocation, ct);
+            if(sourceType.IsAnonymousType || targetType.IsAnonymousType)
+            {
+                return new RawCandidate(
+                    kind, isInsideExpresionTree,
+                    null, null, null, null,
+                    ImmutableArray.Create(new GeneratorDiagnostic(AnonymousSourceRule, location))
+                );
+            }
+
+            List<GeneratorDiagnostic> diagnostics = [];
+            if(isInsideExpresionTree)
+            {
+                if(kind == CallKind.SourceToExisting)
+                {
+                    diagnostics.Add(new (UnsupportedInEpressionTree, location, sourceType.ToDisplayString(SymbolDisplayFormat.CSharpShortErrorMessageFormat), targetType.ToDisplayString(SymbolDisplayFormat.CSharpShortErrorMessageFormat)));
+                }
+                else
+                {
+                    kind = CallKind.ProjectionTo;
+                }
+            }
+
+
+
+            var builder = cache.GetValue(ctx.SemanticModel.Compilation, key => new MappingBuilder(key));
+            Mapping? mapping = null;
+            EquatableArray<string>? code = null;
+            try
+            {
+                mapping = builder.Build(sourceType, targetType);
+                code = MappingEmitter.Emit(kind, mapping).ToImmutableArray();
+            }
+            catch (MappingGenerationException ex)
+            {
+                diagnostics.Add(new (IncompatibleMappingRule,
+                    location,
+                    sourceType.ToDisplayString(SymbolDisplayFormat.CSharpShortErrorMessageFormat),
+                    targetType.ToDisplayString(SymbolDisplayFormat.CSharpShortErrorMessageFormat),
+                    ex.Message));
+            }
+
+            var interceptLocation = ctx.SemanticModel.GetInterceptableLocation(invocation);
+            return new RawCandidate(
+                kind, isInsideExpresionTree,
+                mapping?.SourceType, mapping?.TargetType,
+                interceptLocation,
+                code, diagnostics.ToImmutableArray()
+                );
+
         }
         return null;
     }
@@ -348,4 +366,3 @@ public sealed class FusionMapperInterceptorGenerator : IIncrementalGenerator
         } && cf.ToDisplayString() == "System.Linq.IQueryable<T>";
 
 }
-

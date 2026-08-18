@@ -22,7 +22,7 @@ public class AdvancedFlatteningTests
     {
         public string CustomerName { get; set; } = string.Empty;
         public int CustomerAddressesCount { get; set; }
-        public string CustomerAddressesFirstOrDefaultCity { get; set; } = string.Empty;
+        public string? CustomerAddressesFirstOrDefaultCity { get; set; } = string.Empty;
     }
 
     [Test]

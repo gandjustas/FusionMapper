@@ -1,9 +1,5 @@
-﻿using System.Collections.Immutable;
-using System.Security.Cryptography.X509Certificates;
-using System.Text;
-using System.Text.RegularExpressions;
+﻿using System.Text;
 using Microsoft.CodeAnalysis;
-using Microsoft.CodeAnalysis.CSharp;
 
 namespace FusionMapper.SourceGenerator;
 
@@ -11,9 +7,9 @@ class SourceEmmiter
 {
     static readonly string AssemblyName = System.Reflection.Assembly.GetExecutingAssembly().GetName().Name;
     static readonly string AssemblyVersion = System.Reflection.Assembly.GetExecutingAssembly().GetName().Version.ToString() ?? "1.0.0.0";
-    public static string EmitMappers(SourceProductionContext spc, ImmutableArray<Mapped> input)
+    public static string EmitMappers(IReadOnlyList<Mapped> input)
     {
-        StringBuilder sb = new(input.Length * 300);
+        StringBuilder sb = new(input.Count * 300);
         AppendGenerateFileHeader(sb);
         sb.AppendLine("#pragma warning disable CS8321"); // The local function 'Map__FusionMapper_Tests_ItemSource____To__FusionMapper_Tests_ItemTarget__' is declared but never used
         sb.AppendLine("#pragma warning disable CS8629"); // Suppress erors Nullable<T> -> T
@@ -26,7 +22,7 @@ class SourceEmmiter
             {
             """);
         
-        EmitMappers(sb, spc, input);
+        EmitMappers(sb, input);
 
         sb.AppendLine("}");
         sb.AppendLine("#pragma warning restore CS8629");
@@ -34,9 +30,9 @@ class SourceEmmiter
         return sb.ToString();
     }
 
-    public static string EmitInitializer(ImmutableArray<Mapped> candidates, int dotnetVersion)
+    public static string EmitInitializer(IReadOnlyList<Initialized> candidates, int dotnetVersion)
     {
-        StringBuilder sb = new(candidates.Count() * 200);
+        StringBuilder sb = new(candidates.Count * 200);
 
         AppendGenerateFileHeader(sb);
         sb.AppendLine($"namespace {AssemblyName};");
@@ -137,15 +133,15 @@ class SourceEmmiter
 
             """);
 
-        var groups = candidates.GroupBy(c => (c.Source, c.Target, c.Kind));
+        var groups = candidates
+            .GroupBy(c => (c.Source, c.Target, c.Kind), c => c.Location);
         foreach (var group in groups)
         {
             var (source, target, kind) = group.Key;
             var methodName = GetMethodName(source, target, kind);
 
-            foreach (var interceptable in group)
+            foreach (var location in group)
             {
-                var location = interceptable.InterceptableLocation;
                 Indent(sb, 2);
                 sb.AppendLine($"""[global::System.Runtime.CompilerServices.InterceptsLocation({location.Version}, "{location.Data}")]""");
             }
@@ -163,30 +159,21 @@ class SourceEmmiter
     }
 
 
-    private static void EmitInitializer(StringBuilder sb, ImmutableArray<Mapped> candidates, int dotnetVersion)
+    private static void EmitInitializer(StringBuilder sb, IEnumerable<Initialized> candidates, int dotnetVersion)
     {
         sb.AppendLine("#pragma warning disable CS8974"); // Suppress Converting method group 'method' to non-delegate type 'type'. Did you intend to invoke the method?
 
-        var projectionsToAddToCache = from m in candidates
-                                      where m.IsInsideExpressionTree
-                                      group m by (m.Source, m.Target) into g
-                                      select g.Key;
-
-        foreach (var (source, target) in projectionsToAddToCache)
+        foreach (var (kind, source, target,  _) in candidates.Where(c => c.IsInsideExpressionTree))
         {
-            var methodName = $"global::{AssemblyName}.Generated." + GetMethodName(source, target, CallKind.ProjectionTo);
+            var methodName = $"global::{AssemblyName}.Generated." + GetMethodName(source, target, kind);
             Indent(sb, 2);
             sb.AppendLine($"cache.TryAdd((typeof({source.Runtime}), typeof({target.Runtime})),{methodName});");
         }
         sb.AppendLine();
 
-        var methods = from m in candidates
-                      where !m.IsInsideExpressionTree
-                      group m by (m.Source, m.Target, m.Kind) into g
-                      select g.Key;
-        foreach (var method in methods)
+
+        foreach (var (kind, source, target,  _) in candidates.Where(c => !c.IsInsideExpressionTree))
         {
-            var (source, target, kind) = method;
             var methodName = $"global::{AssemblyName}.Generated." + GetMethodName(source, target, kind);
             if (dotnetVersion >= 9)
             {
@@ -312,62 +299,37 @@ class SourceEmmiter
     }
 
 
-    private static void EmitMappers(StringBuilder sb, SourceProductionContext spc, IEnumerable<Mapped> candidates)
+    private static void EmitMappers(StringBuilder sb, IEnumerable<Mapped> candidates)
     {
-        var regularCalls = candidates.Where(c => !c.IsInsideExpressionTree).ToLookup(c => (c.Source, c.Target, c.Kind, c.Mapping));
 
-        var insideExpressionTree = candidates
-            .Where(c => c.IsInsideExpressionTree)
-            .ToLookup(c => (c.Source, c.Target, CallKind.ProjectionTo, c.Mapping));
-
-        var groups = regularCalls.Concat(insideExpressionTree.Where(g => !regularCalls.Contains(g.Key)));
-        foreach (var group in groups)
+        foreach (var (kind, source, target,  code) in candidates)
         {
-            var(source, target, kind, mapping) = group.Key;
-            try
+            var methodName = GetMethodName(source, target, kind);
+            switch (kind)
             {
-                var methodName = GetMethodName(source, target, kind);
-                switch (kind)
-                {
-                    case CallKind.SourceTo:
-                        var emittedMapping = MappingEmitter.Emit(kind, mapping).ToArray();
-                        AppendGeneratedMethodAttributes(sb, 1);
-                        sb.AppendLine($"    public static {target.Signature} {methodName}({source.Signature} source)");
-                        sb.AppendLine("    {");
-                        AppendIndented(sb, emittedMapping, 2);
-                        sb.AppendLine("    }");
-                        sb.AppendLine();
-                        break;
+                case CallKind.SourceTo:
+                    AppendGeneratedMethodAttributes(sb, 1);
+                    sb.AppendLine($"    public static {target.Signature} {methodName}({source.Signature} source)");
+                    sb.AppendLine("    {");
+                    AppendIndented(sb, code.AsImmutableArray(), 2);
+                    sb.AppendLine("    }");
+                    sb.AppendLine();
+                    break;
 
-                    case CallKind.SourceToExisting:
-                        emittedMapping = [.. MappingEmitter.Emit(kind, mapping)];
-                        AppendGeneratedMethodAttributes(sb, 1);
-                        sb.AppendLine($"    public static {target.Signature} {methodName}({source.Signature} source, {target.Signature} target)");
-                        sb.AppendLine("    {");
-                        AppendIndented(sb, emittedMapping, 2);
-                        sb.AppendLine("    }");
-                        sb.AppendLine();
-                        break;
-                    case CallKind.ProjectionTo:
-                        emittedMapping = [.. MappingEmitter.Emit(kind, mapping)];
-                        sb.AppendLine($$"""
-                                public static global::System.Linq.Expressions.Expression<global::System.Func<{{source.Signature}}, {{target.Signature}}>> {{methodName}} = {{emittedMapping[0]}};
+                case CallKind.SourceToExisting:
+                    AppendGeneratedMethodAttributes(sb, 1);
+                    sb.AppendLine($"    public static {target.Signature} {methodName}({source.Signature} source, {target.Signature} target)");
+                    sb.AppendLine("    {");
+                    AppendIndented(sb, code.AsImmutableArray(), 2);
+                    sb.AppendLine("    }");
+                    sb.AppendLine();
+                    break;
+                case CallKind.ProjectionTo:
+                    sb.AppendLine($$"""
+                                public static global::System.Linq.Expressions.Expression<global::System.Func<{{source.Signature}}, {{target.Signature}}>> {{methodName}} = {{code.AsImmutableArray()[0]}};
                             """);
-                        sb.AppendLine();
-                        break;
-                }
-            }
-            catch (Exception ex)
-            {
-                var loc = group.First().Location!;
-
-                spc.ReportDiagnostic(Diagnostic.Create(
-                    FusionMapperInterceptorGenerator.IncompatibleMappingRule,
-                    loc,
-                    group.Skip(1).Select(x => x.Location),
-                    source.FullName,
-                    target.FullName,
-                    ex.Message));
+                    sb.AppendLine();
+                    break;
             }
         }
 
@@ -463,4 +425,5 @@ class SourceEmmiter
             sb.Append(' ');
         }
     }
+
 }

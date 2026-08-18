@@ -127,7 +127,7 @@ internal static class MappingEmitter
         string sourceExpression,
         string targetExpression)
     {
-        foreach (var member in mapping.Members)
+        foreach (var member in mapping.Members.AsImmutableArray())
         {
             if (member.IsInitOnly)
             {
@@ -382,14 +382,14 @@ internal static class MappingEmitter
     {
         var constructor = ChooseConstructor(mapping);
 
-        var arguments = constructor.Parameters
+        var arguments = constructor.Parameters.AsImmutableArray()
             .Select(parameter => EmitConstructorArgument(parameter, sourceExpression, context));
 
         var assignedByConstructor = new HashSet<string>(
-            constructor.AssignedMemberNames,
+            constructor.AssignedMemberNames.AsImmutableArray(),
             StringComparer.OrdinalIgnoreCase);
 
-        var bindings = mapping.Members
+        var bindings = mapping.Members.AsImmutableArray()
             .Where(member => member.CanWrite)
             .Where(member => !assignedByConstructor.Contains(member.TargetMemberName))
             .Select(member =>
@@ -406,16 +406,16 @@ internal static class MappingEmitter
 
     private static ConstructorCandidate ChooseConstructor(ObjectMapping mapping)
     {
-        if (mapping.Constructors.Length == 0)
+        if (mapping.Constructors.AsImmutableArray().Length == 0)
         {
             throw new MappingGenerationException(
                 $"No suitable constructor or required members are not mapped for type '{mapping.TargetType.FullName}'.");
         }
 
-        return mapping.Constructors
+        return mapping.Constructors.AsImmutableArray()
             .OrderByDescending(c => c.SetsRequiredMembers)
-            .ThenByDescending(c => c.Parameters.Count(p => p.IsMapped))
-            .ThenByDescending(c => c.Parameters.Length)
+            .ThenByDescending(c => c.Parameters.AsImmutableArray().Count(p => p.IsMapped))
+            .ThenByDescending(c => c.Parameters.AsImmutableArray().Length)
             .First();
     }
 
@@ -722,20 +722,58 @@ internal static class MappingEmitter
     }
 
     private static string EmitFirstOrLast(
-    string methodName,
-    AggregateMapping mapping,
-    string sourceExpression,
-    EmitContext context)
+        string methodName,
+        AggregateMapping mapping,
+        string sourceExpression,
+        EmitContext context)
     {
-        // Вариант без селектора:
-        // ItemsFirst -> source.Items.First()
-        // Но если элемент нужно маппить, делаем Select(...).First(),
-        // чтобы не вычислять First несколько раз.
+        // Применяем предикат, если он есть.
+        //
+        // CustomerAddressesIsPrimaryFirstOrDefaultCity
+        // -> source.Customer.Addresses.Where(__item => __item.IsPrimary)
+        sourceExpression = ApplyPredicate(mapping, sourceExpression);
+
+        // Новый сценарий с пост-агрегатным выражением:
+        //
+        // CustomerAddressesFirstOrDefaultCity
+        // CustomerAddressesFirstOrDefaultPropertySubCollectionCount
+        // CustomerAddressesIsPrimaryFirstOrDefaultPropertySubCollectionCount
+        if (mapping.PostSource is not null && mapping.PostMapping is not null)
+        {
+            var postAccess = BuildAccessExpression("__item", mapping.PostSource.Value);
+
+            var postBody = EmitValue(
+                mapping.PostMapping,
+                postAccess,
+                context);
+
+            postBody = WrapIntermediateNullChecks(
+                "__item",
+                mapping.PostSource.Value,
+                mapping.PostMapping.TargetType,
+                postBody);
+
+            var projected =
+                $"global::System.Linq.Enumerable.Select<{mapping.ElementType.Runtime}, {mapping.TargetType.Runtime}>(" +
+                $"{sourceExpression}, static __item => {postBody})";
+
+            var result =
+                $"global::System.Linq.Enumerable.{methodName}({projected})";
+
+            return NormalizeFirstOrDefaultNullability(mapping, methodName, result);
+        }
+
+        // Старый вариант без селектора:
+        // ItemsFirst
+        // ItemsFirstOrDefault
         if (mapping.Selector is null)
         {
             if (mapping.ElementMapping is null)
             {
-                return $"global::System.Linq.Enumerable.{methodName}({sourceExpression})";
+                return NormalizeFirstOrDefaultNullability(
+                    mapping,
+                    methodName,
+                    $"global::System.Linq.Enumerable.{methodName}({sourceExpression})");
             }
 
             var elementExpression = EmitValue(
@@ -745,25 +783,45 @@ internal static class MappingEmitter
 
             if (elementExpression == "__item")
             {
-                return $"global::System.Linq.Enumerable.{methodName}({sourceExpression})";
+                return NormalizeFirstOrDefaultNullability(
+                    mapping,
+                    methodName,
+                    $"global::System.Linq.Enumerable.{methodName}({sourceExpression})");
             }
 
-            return
+            return NormalizeFirstOrDefaultNullability(
+                mapping,
+                methodName,
                 $"global::System.Linq.Enumerable.{methodName}(" +
-                $"global::System.Linq.Enumerable.Select({sourceExpression}, static __item => {elementExpression}))";
+                $"global::System.Linq.Enumerable.Select({sourceExpression}, static __item => {elementExpression}))");
         }
 
-        // Вариант с селектором:
-        // ItemsNameFirstOrDefault -> source.Items.Select(x => x.Name).FirstOrDefault()
+        // Старый вариант с простым селектором:
+        // ItemsNameFirstOrDefault
         var selectorExpression = BuildAccessExpression("__item", mapping.Selector.Value);
 
-        var projected =
+        var projectedSelector =
             $"global::System.Linq.Enumerable.Select({sourceExpression}, static __item => {selectorExpression})";
 
-        var result =
-            $"global::System.Linq.Enumerable.{methodName}({projected})";
+        var resultSelector =
+            $"global::System.Linq.Enumerable.{methodName}({projectedSelector})";
 
-        return ApplyAggregateResultMapping(mapping, result);
+        return ApplyAggregateResultMapping(mapping, resultSelector);
+    }
+
+    private static string NormalizeFirstOrDefaultNullability(
+    AggregateMapping mapping,
+    string methodName,
+    string expression)
+    {
+        if (methodName is "FirstOrDefault" or "LastOrDefault" &&
+            mapping.TargetType.IsReference &&
+            !mapping.TargetType.IsNullableByNullability)
+        {
+            return $"({expression})!";
+        }
+
+        return expression;
     }
 
     private static string ApplyAggregateResultMapping(
@@ -783,6 +841,28 @@ internal static class MappingEmitter
             EmitContext.ExpressionTree);
     }
 
+    private static string ApplyPredicate(
+    AggregateMapping mapping,
+    string sourceExpression)
+    {
+        if (mapping.Predicate is null)
+        {
+            return sourceExpression;
+        }
+
+        var predicateBody = BuildAccessExpression("__item", mapping.Predicate.Value);
+
+        // Если промежуточные объекты в предикате nullable,
+        // при null возвращаем false.
+        predicateBody = WrapIntermediateNullChecks(
+            "__item",
+            mapping.Predicate.Value,
+            "false",
+            predicateBody);
+
+        return
+            $"global::System.Linq.Enumerable.Where({sourceExpression}, static __item => {predicateBody})";
+    }
 
     private static string EmitCustomCollectionExpression(
     CollectionMapping mapping,
@@ -826,7 +906,7 @@ internal static class MappingEmitter
     {
         var sb = new StringBuilder(rootExpression);
 
-        foreach (var segment in path.Segments)
+        foreach (var segment in path.Segments.AsImmutableArray())
         {
             sb.Append('.').Append(segment.MemberName);
         }
@@ -843,7 +923,7 @@ internal static class MappingEmitter
 
         for (var i = 0; i <= index; i++)
         {
-            sb.Append('.').Append(path.Segments[i].MemberName);
+            sb.Append('.').Append(path.Segments.AsImmutableArray()[i].MemberName);
         }
 
         return sb.ToString();
@@ -855,11 +935,25 @@ internal static class MappingEmitter
         TypeModel targetType,
         string mappedExpression)
     {
-        var result = mappedExpression;
+        return WrapIntermediateNullChecks(
+            rootExpression,
+            path,
+            DefaultLiteral(targetType),
+            mappedExpression);
+    }
 
-        for (var i = path.Segments.Length - 2; i >= 0; i--)
+    private static string WrapIntermediateNullChecks(
+    string rootExpression,
+    SourcePath path,
+    string defaultLiteral,
+    string mappedExpression)
+    {
+        var result = mappedExpression;
+        var segments = path.Segments.AsImmutableArray();
+
+        for (var i = segments.Length - 2; i >= 0; i--)
         {
-            var segment = path.Segments[i];
+            var segment = segments[i];
 
             if (!segment.Type.IsNullableByNullability)
             {
@@ -868,7 +962,7 @@ internal static class MappingEmitter
 
             var prefix = BuildPrefix(rootExpression, path, i);
 
-            result = $"({prefix} == null ? {DefaultLiteral(targetType)} : {result})";
+            result = $"({prefix} == null ? {defaultLiteral} : {result})";
         }
 
         return result;
@@ -879,32 +973,21 @@ internal static class MappingEmitter
     // ------------------------------------------------------------------
     private static string DefaultLiteral(TypeModel target)
     {
+        if (target.IsNullableValue)
+        {
+            if (target.NullableUnderlyingRuntime is null)
+            {
+                return $"default({target.Signature})";
+            }
+
+            return $"new global::System.Nullable<{target.NullableUnderlyingRuntime}>()";
+        }
+
         return target.IsReference && !target.IsNullableByNullability
             ? "default!"
             : "default";
     }
 
-    private static bool IsArray(TypeModel type)
-    {
-        return type.Runtime.EndsWith("[]", StringComparison.Ordinal);
-    }
-
-    private static bool IsGenericList(TypeModel type)
-    {
-        return type.Runtime.StartsWith(
-            "global::System.Collections.Generic.List<",
-            StringComparison.Ordinal);
-    }
-
-    private static bool IsKnownCollectionInterface(TypeModel type)
-    {
-        return
-            type.Runtime.StartsWith("global::System.Collections.Generic.IEnumerable<", StringComparison.Ordinal) ||
-            type.Runtime.StartsWith("global::System.Collections.Generic.ICollection<", StringComparison.Ordinal) ||
-            type.Runtime.StartsWith("global::System.Collections.Generic.IList<", StringComparison.Ordinal) ||
-            type.Runtime.StartsWith("global::System.Collections.Generic.IReadOnlyCollection<", StringComparison.Ordinal) ||
-            type.Runtime.StartsWith("global::System.Collections.Generic.IReadOnlyList<", StringComparison.Ordinal);
-    }
 
     private static bool IsNullableValueToNonNullableValue(Mapping mapping)
     {

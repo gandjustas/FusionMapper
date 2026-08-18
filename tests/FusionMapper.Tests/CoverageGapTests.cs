@@ -671,6 +671,8 @@ public class CoverageGapTests
             .Throws<ArgumentNullException>();
     }
 
+#if !FUSION_MAPPER_SOURCE_GENERATOR
+
     [Test]
     public async Task Rewrite_Map_To_Existing_Target_Throws()
     {
@@ -687,6 +689,8 @@ public class CoverageGapTests
         await Assert.That(() => ExpressionRewriter.Rewrite(query).ToList())
             .Throws<MappingException>();
     }
+#endif
+
 
     [Test]
     public async Task Rewrite_Map_Without_To_Throws()
@@ -769,7 +773,7 @@ public class CoverageGapTests
         await Assert.That(result[0].Name).IsEqualTo("A");
     }
 
-    #endregion
+#endregion
 
 
     #region Models

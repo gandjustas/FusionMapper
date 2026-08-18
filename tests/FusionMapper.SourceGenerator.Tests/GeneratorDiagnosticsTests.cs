@@ -6,7 +6,7 @@ namespace FusionMapper.SourceGenerator.Tests;
 public class GeneratorDiagnosticsTests
 {
     [Test]
-    public async Task Anonymous_Type_Should_Produce_FMAP002()
+    public async Task Anonymous_Type_Should_Produce_FMAP003()
     {
         var source = """
             using FusionMapper;
@@ -30,7 +30,7 @@ public class GeneratorDiagnosticsTests
         var driver = CSharpGeneratorDriver.Create([generator.AsSourceGenerator()], optionsProvider: new OptionsProvider());
         var result = driver.RunGeneratorsAndUpdateCompilation(compilation, out _, out var diagnostics);
         await Assert.That(result).IsNotNull();
-        await Assert.That(diagnostics.Any(d => d.Id == "FMAP002")).IsTrue();
+        await Assert.That(diagnostics.Any(d => d.Id == "FMAP003")).IsTrue();
     }
 
     private static CSharpCompilation CreateCompilation(string source)

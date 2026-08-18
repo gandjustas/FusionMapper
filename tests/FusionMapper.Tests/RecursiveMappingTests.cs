@@ -2,6 +2,8 @@ namespace FusionMapper.Tests;
 
 public class RecursiveMappingTests
 {
+
+#if !FUSION_MAPPER_SOURCE_GENERATOR
     [Test]
     public async Task Map_Direct_Recursive_Type_Throws()
     {
@@ -58,6 +60,8 @@ public class RecursiveMappingTests
         await Assert.That(() => source.Map().To<CycleTarget>())
             .Throws<MappingException>();
     }
+#endif
+
 
     public class IndirectSourceA
     {
