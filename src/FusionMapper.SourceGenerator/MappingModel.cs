@@ -1,4 +1,6 @@
-﻿namespace FusionMapper.SourceGenerator;
+﻿using System.Collections.Immutable;
+
+namespace FusionMapper.SourceGenerator;
 
 internal abstract record Mapping
 {
@@ -41,89 +43,69 @@ internal sealed record AggregateMapping : Mapping
     public required TypeModel ElementType { get; init; }
 
     /// <summary>
-    /// Старый селектор вида ItemsNameFirstOrDefault -> Name.
+    /// Предикат для Where/Any/All.
     /// </summary>
-    public SourcePath? Selector { get; init; }
+    public required AggregatePredicate? Predicate { get; init; }
 
     /// <summary>
-    /// Предикат для First/Last/FirstOrDefault/LastOrDefault.
-    /// Например: ItemsActiveFirstOrDefault -> Active.
+    /// Проекция элемента перед агрегатом.
+    /// Для First/Last сюда может быть опущен элемент целиком.
+    /// Для Sum/Max/Min сюда опускается селектор.
     /// </summary>
-    public SourcePath? Predicate { get; init; }
+    public required AggregateProjection? Projection { get; init; }
 
     /// <summary>
-    /// Путь внутри элемента для пост-агрегатного выражения.
+    /// Финальный маппинг результата агрегата в target.
     /// </summary>
-    public SourcePath? PostSource { get; init; }
+    public required Mapping? ResultMapping { get; init; }
 
     /// <summary>
-    /// Маппинг пост-агрегатного выражения.
+    /// Для Count: можно использовать .Count вместо Enumerable.Count().
     /// </summary>
-    public Mapping? PostMapping { get; init; }
+    public required bool UseCountProperty { get; init; }
 
     /// <summary>
-    /// Маппинг элемента коллекции в целевой тип.
-    /// Используется для First/Last без селектора.
+    /// Для FirstOrDefault/LastOrDefault в non-nullable reference target.
     /// </summary>
-    public Mapping? ElementMapping { get; init; }
-
-    /// <summary>
-    /// Маппинг результата агрегата в целевой тип.
-    /// </summary>
-    public Mapping? ResultMapping { get; init; }
-
-    /// <summary>
-    /// Факт для Emitter: можно ли читать Count как свойство.
-    /// </summary>
-    public required bool SourceHasCountProperty { get; init; }
+    public required bool RequiresNullForgiving { get; init; }
 }
+
+internal sealed record AggregatePredicate(SourcePath Path);
+
+internal sealed record AggregateProjection(SourcePath? Path, Mapping Mapping);
 
 internal sealed record ObjectMapping : Mapping
 {
     /// <summary>
-    /// Все допустимые конструкторы.
-    /// Выбор конкретного конструктора делает Emitter.
+    /// Конструктор уже выбран builder'ом.
     /// </summary>
-    public required EquatableArray<ConstructorCandidate> Constructors { get; init; }
+    public required SelectedConstructor Constructor { get; init; }
 
     /// <summary>
-    /// Все члены target, которые Builder смог сопоставить с source.
-    /// Emitter сам решает, какие из них использовать для создания,
-    /// какие для обновления, какие пропустить.
+    /// Все члены, которые можно использовать для creation/existing mutation.
     /// </summary>
-    public required EquatableArray<MemberBinding> Members { get; init; }
+    public required ImmutableArray<MemberBinding> Members { get; init; }
 
-    public required EquatableArray<string> RequiredMemberNames { get; init; }
+    public required ImmutableArray<MemberBinding> CreationMembers { get; init; }
 }
 
-readonly record struct ConstructorCandidate
+readonly record struct SelectedConstructor
 {
-    public required EquatableArray<ConstructorParameter> Parameters { get; init; }
-
-    public required bool SetsRequiredMembers { get; init; }
-
-    /// <summary>
-    /// Имена required/обычных членов, которые закрываются параметрами конструктора.
-    /// </summary>
-    public required EquatableArray<string> AssignedMemberNames { get; init; }
+    public required ImmutableArray<ConstructorArgument> Arguments { get; init; }
+    public required ImmutableHashSet<string> AssignedMemberNames { get; init; }
 }
 
-readonly record struct ConstructorParameter
+readonly record struct ConstructorArgument
 {
     public required TypeModel ParameterType { get; init; }
-
     public required bool IsMapped { get; init; }
-
-    public required bool CanUseDefault { get; init; }
-
     public SourcePath? Source { get; init; }
-
     public Mapping? Value { get; init; }
 }
 
 readonly record struct SourcePath
 {
-    public required EquatableArray<SourcePathSegment> Segments { get; init; }
+    public required ImmutableArray<SourcePathSegment> Segments { get; init; }
 }
 
 readonly record struct SourcePathSegment
@@ -135,54 +117,84 @@ readonly record struct SourcePathSegment
 readonly record struct MemberBinding
 {
     public required string TargetMemberName { get; init; }
-
     public required SourcePath Source { get; init; }
-
     public required Mapping Value { get; init; }
 
-    public required bool IsRequired { get; init; }
-
-    public required bool IsInitOnly { get; init; }
-
-    /// <summary>
-    /// Можно ли прочитать член target.
-    /// Нужно для existing-mapping: mutate existing object/collection.
-    /// </summary>
-    public required bool CanRead { get; init; }
-
-    /// <summary>
-    /// Можно ли записать член target.
-    /// </summary>
     public required bool CanWrite { get; init; }
 
     /// <summary>
-    /// Target member является value type.
-    /// Emitter использует это, чтобы не пытаться мутировать struct inplace.
+    /// Как вести себя при маппинге в существующий объект.
     /// </summary>
-    public required bool IsTargetMemberValueType { get; init; }
+    public required MemberMutationKind MutationKind { get; init; }
+}
+
+internal enum MemberMutationKind
+{
+    Skip,
+    Assign,
+    MutateObject,
+    MutateCollection
 }
 
 internal sealed record CollectionMapping : Mapping
 {
     public required TypeModel ElementTypeName { get; init; }
-
     public required Mapping ElementMapping { get; init; }
 
-    public required CollectionCapabilities Capabilities { get; init; }
+    /// <summary>
+    /// Конкретные стратегии создания и мутации коллекции.
+    /// </summary>
+    public required CollectionPlan Plan { get; init; }
 }
 
-readonly record struct CollectionCapabilities
+readonly record struct CollectionPlan
 {
     public required bool IsArray { get; init; }
-    public required bool IsGenericList { get; init; }
-    public required bool IsKnownCollectionInterface { get; init; }
 
-    public required bool HasClearMethod { get; init; }
-    public required bool HasAddMethod { get; init; }
-    public required bool HasAddRangeMethod { get; init; }
+    public required CollectionCreationKind MethodBodyCreation { get; init; }
+    public required CollectionCreationKind ExpressionTreeCreation { get; init; }
 
-    public required bool HasParameterlessConstructor { get; init; }
-    public required bool HasEnumerableConstructor { get; init; }
+    public required CollectionMutationKind Mutation { get; init; }
+}
 
-    public required bool HasCountProperty { get; init; }
+internal enum CollectionCreationKind
+{
+    Unsupported,
+
+    /// <summary>
+    /// Enumerable.ToArray
+    /// </summary>
+    Array,
+
+    /// <summary>
+    /// Enumerable.ToList
+    /// </summary>
+    List,
+
+    /// <summary>
+    /// [.. items]
+    /// </summary>
+    CollectionExpression,
+
+    /// <summary>
+    /// new Target(items)
+    /// </summary>
+    EnumerableConstructor,
+
+    /// <summary>
+    /// IIFE/выражение с AddRange.
+    /// </summary>
+    AddRangeClosure,
+
+    /// <summary>
+    /// IIFE/выражение с Add.
+    /// </summary>
+    AddLoopClosure,
+}
+
+internal enum CollectionMutationKind
+{
+    None,
+    ClearAddRange,
+    ClearAdd
 }

@@ -8,19 +8,17 @@ static class FusionAccessorMetadata
     private const string FusionProjectionMetadataName = "FusionMapper.FusionProjection`1";
     private const string ValueParameterName = "value";
 
-    public static AccessorFieldNames Resolve(Compilation compilation, CancellationToken ct)
+    public static AccessorFieldNames Resolve(Compilation compilation)
     {
         var (sourceField, sourceResolved) = ResolveBackingFieldName(
             compilation,
             FusionSourceMetadataName,
-            ValueParameterName,
-            ct);
+            ValueParameterName);
 
         var (projectionField, projectionResolved) = ResolveBackingFieldName(
             compilation,
             FusionProjectionMetadataName,
-            ValueParameterName,
-            ct);
+            ValueParameterName);
 
         return new AccessorFieldNames(
             sourceField,
@@ -32,8 +30,7 @@ static class FusionAccessorMetadata
     private static (string Name, bool Resolved) ResolveBackingFieldName(
         Compilation compilation,
         string metadataName,
-        string parameterName,
-        CancellationToken ct)
+        string parameterName)
     {
         var fallbackName = $"<{parameterName}>P";
 

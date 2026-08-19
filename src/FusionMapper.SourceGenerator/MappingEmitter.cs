@@ -27,7 +27,18 @@ internal static class MappingEmitter
     // ------------------------------------------------------------------
     private static IEnumerable<string> EmitCreateBody(Mapping mapping)
     {
-        if (mapping.SourceType.IsNullableByNullability && !IsNullableValueToNonNullableValue(mapping))
+        if (mapping is CollectionMapping
+            {
+                Plan.MethodBodyCreation: CollectionCreationKind.Unsupported
+            } unsupportedCollection)
+        {
+            throw new MappingGenerationException(
+                $"Cannot materialize collection '{unsupportedCollection.TargetType.FullName}'. " +
+                "The target collection does not have a suitable constructor, Add or AddRange.");
+        }
+
+        if (mapping.SourceType.IsNullableByNullability &&
+            !IsNullableValueToNonNullableValue(mapping))
         {
             if (mapping.TargetType.IsReference || mapping.TargetType.IsNullableByNullability)
             {
@@ -35,18 +46,8 @@ internal static class MappingEmitter
             }
             else
             {
-                yield return "global::System.ArgumentNullException.ThrowIfNull(source);";
+                yield return "if (source == null) throw new global::System.InvalidOperationException(\"Cannot map null source to a non-nullable value type.\");";
             }
-        }
-
-        if (mapping is CollectionMapping collection && !CanUseCollectionExpression(collection))
-        {
-            foreach (var line in EmitCustomCollectionCreation(collection, "source"))
-            {
-                yield return line;
-            }
-
-            yield break;
         }
 
         yield return $"return {EmitCore(mapping, "source", EmitContext.MethodBody)};";
@@ -71,16 +72,14 @@ internal static class MappingEmitter
         {
             case CollectionMapping collection:
                 {
-                    if (collection.Capabilities.IsArray)
+                    if (collection.Plan.IsArray)
                     {
                         yield return
                             $"throw new global::FusionMapper.MappingException(\"Mapping into an existing array of '{collection.TargetType.FullName}' is not supported.\");";
-
                         yield break;
                     }
 
-                    if (!collection.Capabilities.HasClearMethod ||
-                        (!collection.Capabilities.HasAddMethod && !collection.Capabilities.HasAddRangeMethod))
+                    if (collection.Plan.Mutation == CollectionMutationKind.None)
                     {
                         yield return "return target;";
                         yield break;
@@ -103,7 +102,6 @@ internal static class MappingEmitter
                     {
                         yield return
                             $"throw new global::FusionMapper.MappingException(\"Mapping into an existing instance of '{objectMapping.TargetType.FullName}' is not supported.\");";
-
                         yield break;
                     }
 
@@ -127,152 +125,226 @@ internal static class MappingEmitter
         string sourceExpression,
         string targetExpression)
     {
-        foreach (var member in mapping.Members.AsImmutableArray())
+        foreach (var member in mapping.Members)
         {
-            if (member.IsInitOnly)
+            switch (member.MutationKind)
             {
-                continue;
-            }
-
-            var sourceAccess = BuildAccessExpression(sourceExpression, member.Source);
-
-            var mappedValue = EmitValue(
-                member.Value,
-                sourceAccess,
-                EmitContext.MethodBody);
-
-            // Вложенный reference object.
-            // Если target.Member уже существует, мутируем его.
-            // Если null и можно писать — создаём новый.
-            if (member.Value is ObjectMapping nestedObject &&
-                member.CanRead &&
-                !member.IsTargetMemberValueType &&
-                nestedObject.TargetType.IsReference)
-            {
-                yield return "{";
-                yield return $"    var __current = {targetExpression}.{member.TargetMemberName};";
-                yield return "    if (__current == null)";
-                yield return "    {";
-
-                if (member.CanWrite)
-                {
-                    yield return $"        {targetExpression}.{member.TargetMemberName} = {mappedValue};";
-                }
-
-                yield return "    }";
-                yield return "    else";
-                yield return "    {";
-
-                // Добавляем проверку на null источника перед рекурсивной мутацией
-                if (nestedObject.SourceType.IsNullableByNullability)
-                {
-                    yield return $"        if ({sourceAccess} != null)";
-                    yield return "        {";
-
-                    foreach (var nestedLine in EmitObjectMutationStatements(nestedObject, sourceAccess, "__current"))
-                    {
-                        yield return $"            {nestedLine}";
-                    }
-
-                    yield return "        }";
-                }
-                else
-                {
-                    foreach (var nestedLine in EmitObjectMutationStatements(nestedObject, sourceAccess, "__current"))
-                    {
-                        yield return $"        {nestedLine}";
-                    }
-                }
-
-                yield return "    }";
-                yield return "}";
-
-                continue;
-            }
-
-            // Вложенная коллекция.
-            if (member.Value is CollectionMapping nestedCollection &&
-                member.CanRead &&
-                !nestedCollection.Capabilities.IsArray)
-            {
-                var canMutate =
-                    nestedCollection.Capabilities.HasClearMethod &&
-                    (nestedCollection.Capabilities.HasAddMethod || nestedCollection.Capabilities.HasAddRangeMethod);
-
-                if (!canMutate && !member.CanWrite)
-                {
+                case MemberMutationKind.Skip:
                     continue;
-                }
 
-                yield return "{";
-                yield return $"    var __current = {targetExpression}.{member.TargetMemberName};";
-                yield return "    if (__current == null)";
-                yield return "    {";
-
-                if (member.CanWrite)
-                {
-                    yield return $"        {targetExpression}.{member.TargetMemberName} = {mappedValue};";
-                }
-
-                yield return "    }";
-
-                if (canMutate)
-                {
-                    yield return "    else";
-                    yield return "    {";
-
-                    // Добавляем проверку на null источника перед мутацией коллекции
-                    if (nestedCollection.SourceType.IsNullableByNullability)
+                case MemberMutationKind.Assign:
                     {
-                        yield return $"        if ({sourceAccess} != null)";
-                        yield return "        {";
+                        var sourceAccess = BuildAccessExpression(sourceExpression, member.Source);
+                        var mappedValue = EmitValue(member.Value, sourceAccess, EmitContext.MethodBody);
 
-                        foreach (var collectionLine in EmitCollectionMutationStatements(
-                                     nestedCollection,
-                                     sourceAccess,
-                                     "__current"))
+                        if (member.Value.SourceType.CanBeNullRuntime &&
+                            member.Value.TargetType.IsValueType &&
+                            !member.Value.TargetType.IsNullableValue)
                         {
-                            yield return $"            {collectionLine}";
+                            var guard = $"{sourceAccess} != null";
+                            guard = WrapIntermediateNullChecks(
+                                sourceExpression,
+                                member.Source,
+                                "false",
+                                guard);
+
+                            yield return $"if ({guard})";
+                            yield return "{";
+                            yield return $"    {targetExpression}.{member.TargetMemberName} = {mappedValue};";
+                            yield return "}";
+                        }
+                        else
+                        {
+                            yield return $"{targetExpression}.{member.TargetMemberName} = {mappedValue};";
                         }
 
-                        yield return "        }";
+                        continue;
                     }
-                    else
+
+                case MemberMutationKind.MutateObject:
                     {
-                        foreach (var collectionLine in EmitCollectionMutationStatements(
-                                     nestedCollection,
-                                     sourceAccess,
-                                     "__current"))
+                        foreach (var statement in EmitNestedObjectMutation(member, sourceExpression, targetExpression))
                         {
-                            yield return $"        {collectionLine}";
+                            yield return statement;
                         }
+
+                        continue;
                     }
 
-                    yield return "    }";
-                }
+                case MemberMutationKind.MutateCollection:
+                    {
+                        foreach (var statement in EmitNestedCollectionMutation(member, sourceExpression, targetExpression))
+                        {
+                            yield return statement;
+                        }
 
-                yield return "}";
-
-                continue;
-            }
-
-            // Простой член или значение, которое заменяем целиком.
-            if (member.CanWrite)
-            {
-                yield return $"{targetExpression}.{member.TargetMemberName} = {mappedValue};";
+                        continue;
+                    }
             }
         }
     }
 
+    private static IEnumerable<string> EmitNestedObjectMutation(
+        MemberBinding member,
+        string sourceExpression,
+        string targetExpression)
+    {
+        var sourceAccess = BuildAccessExpression(sourceExpression, member.Source);
+        var mappedValue = EmitValue(member.Value, sourceAccess, EmitContext.MethodBody);
+
+        yield return "{";
+        yield return $"    var __current = {targetExpression}.{member.TargetMemberName};";
+        yield return "    if (__current == null)";
+        yield return "    {";
+
+        if (member.CanWrite)
+        {
+            if (member.Value.SourceType.CanBeNullRuntime)
+            {
+                var guard = $"{sourceAccess} != null";
+                guard = WrapIntermediateNullChecks(
+                    sourceExpression,
+                    member.Source,
+                    "false",
+                    guard);
+
+                yield return $"        if ({guard})";
+                yield return "        {";
+                yield return $"            {targetExpression}.{member.TargetMemberName} = {mappedValue};";
+                yield return "        }";
+            }
+            else
+            {
+                yield return $"        {targetExpression}.{member.TargetMemberName} = {mappedValue};";
+            }
+        }
+
+        yield return "    }";
+        yield return "    else";
+        yield return "    {";
+
+        var nestedMapping = (ObjectMapping)member.Value;
+
+        if (nestedMapping.SourceType.IsNullableByNullability)
+        {
+            yield return $"        if ({sourceAccess} != null)";
+            yield return "        {";
+
+            foreach (var nestedLine in EmitObjectMutationStatements(nestedMapping, sourceAccess, "__current"))
+            {
+                yield return $"            {nestedLine}";
+            }
+
+            yield return "        }";
+        }
+        else
+        {
+            foreach (var nestedLine in EmitObjectMutationStatements(nestedMapping, sourceAccess, "__current"))
+            {
+                yield return $"        {nestedLine}";
+            }
+        }
+
+        yield return "    }";
+        yield return "}";
+    }
+
+
+    private static IEnumerable<string> EmitNestedCollectionMutation(
+        MemberBinding member,
+        string sourceExpression,
+        string targetExpression)
+    {
+        var sourceAccess = BuildAccessExpression(sourceExpression, member.Source);
+        var mappedValue = EmitValue(member.Value, sourceAccess, EmitContext.MethodBody);
+
+        var collectionMapping = (CollectionMapping)member.Value;
+
+        yield return "{";
+        yield return $"    var __current = {targetExpression}.{member.TargetMemberName};";
+        yield return "    if (__current == null)";
+        yield return "    {";
+
+        if (member.CanWrite)
+        {
+            if (member.Value.SourceType.CanBeNullRuntime)
+            {
+                var guard = $"{sourceAccess} != null";
+                guard = WrapIntermediateNullChecks(
+                    sourceExpression,
+                    member.Source,
+                    "false",
+                    guard);
+
+                yield return $"        if ({guard})";
+                yield return "        {";
+                yield return $"            {targetExpression}.{member.TargetMemberName} = {mappedValue};";
+                yield return "        }";
+            }
+            else
+            {
+                yield return $"        {targetExpression}.{member.TargetMemberName} = {mappedValue};";
+            }
+        }
+
+        yield return "    }";
+        yield return "    else";
+        yield return "    {";
+
+        if (collectionMapping.SourceType.IsNullableByNullability)
+        {
+            yield return $"        if ({sourceAccess} != null)";
+            yield return "        {";
+
+            foreach (var collectionLine in EmitCollectionMutationStatements(collectionMapping, sourceAccess, "__current"))
+            {
+                yield return $"            {collectionLine}";
+            }
+
+            yield return "        }";
+        }
+        else
+        {
+            foreach (var collectionLine in EmitCollectionMutationStatements(collectionMapping, sourceAccess, "__current"))
+            {
+                yield return $"        {collectionLine}";
+            }
+        }
+
+        yield return "    }";
+        yield return "}";
+    }
 
     private static IEnumerable<string> EmitCollectionMutationStatements(
-    CollectionMapping mapping,
-    string sourceExpression,
-    string targetExpression)
+        CollectionMapping mapping,
+        string sourceExpression,
+        string targetExpression)
     {
-        if (!mapping.Capabilities.HasClearMethod ||
-            (!mapping.Capabilities.HasAddMethod && !mapping.Capabilities.HasAddRangeMethod))
+        if (mapping.Plan.Mutation == CollectionMutationKind.None)
         {
+            yield break;
+        }
+
+        if (IsIdentityCollectionMapping(mapping) && mapping.TargetType.IsReference)
+        {
+            yield return $"var __sourceItems = {sourceExpression};";
+            yield return $"if (!global::System.Object.ReferenceEquals({targetExpression}, __sourceItems))";
+            yield return "{";
+            yield return $"    {targetExpression}.Clear();";
+
+            if (mapping.Plan.Mutation == CollectionMutationKind.ClearAddRange)
+            {
+                yield return $"    {targetExpression}.AddRange(__sourceItems);";
+            }
+            else
+            {
+                yield return "    foreach (var __item in __sourceItems)";
+                yield return "    {";
+                yield return $"        {targetExpression}.Add(__item);";
+                yield return "    }";
+            }
+
+            yield return "}";
             yield break;
         }
 
@@ -290,7 +362,7 @@ internal static class MappingEmitter
 
         yield return $"{targetExpression}.Clear();";
 
-        if (mapping.Capabilities.HasAddRangeMethod)
+        if (mapping.Plan.Mutation == CollectionMutationKind.ClearAddRange)
         {
             yield return $"{targetExpression}.AddRange(__mappedItems);";
         }
@@ -302,7 +374,6 @@ internal static class MappingEmitter
             yield return "}";
         }
     }
-
 
     // ------------------------------------------------------------------
     // Expression lambda: ProjectionTo
@@ -346,6 +417,7 @@ internal static class MappingEmitter
         };
     }
 
+
     private static string EmitAssign(AssignMapping mapping, string sourceExpression)
     {
         return mapping.Kind switch
@@ -380,18 +452,10 @@ internal static class MappingEmitter
         string sourceExpression,
         EmitContext context)
     {
-        var constructor = ChooseConstructor(mapping);
-
-        var arguments = constructor.Parameters.AsImmutableArray()
+        var arguments = mapping.Constructor.Arguments
             .Select(parameter => EmitConstructorArgument(parameter, sourceExpression, context));
 
-        var assignedByConstructor = new HashSet<string>(
-            constructor.AssignedMemberNames.AsImmutableArray(),
-            StringComparer.OrdinalIgnoreCase);
-
-        var bindings = mapping.Members.AsImmutableArray()
-            .Where(member => member.CanWrite)
-            .Where(member => !assignedByConstructor.Contains(member.TargetMemberName))
+        var bindings = mapping.CreationMembers
             .Select(member =>
                 $"{member.TargetMemberName} = {EmitMemberBinding(member, sourceExpression, context)}");
 
@@ -404,24 +468,10 @@ internal static class MappingEmitter
         return $"new {mapping.TargetType.Runtime}({argumentList}){initializer}";
     }
 
-    private static ConstructorCandidate ChooseConstructor(ObjectMapping mapping)
-    {
-        if (mapping.Constructors.AsImmutableArray().Length == 0)
-        {
-            throw new MappingGenerationException(
-                $"No suitable constructor or required members are not mapped for type '{mapping.TargetType.FullName}'.");
-        }
-
-        return mapping.Constructors.AsImmutableArray()
-            .OrderByDescending(c => c.SetsRequiredMembers)
-            .ThenByDescending(c => c.Parameters.AsImmutableArray().Count(p => p.IsMapped))
-            .ThenByDescending(c => c.Parameters.AsImmutableArray().Length)
-            .First();
-    }
 
 
     private static string EmitConstructorArgument(
-        ConstructorParameter parameter,
+        ConstructorArgument parameter,
         string rootExpression,
         EmitContext context)
     {
@@ -476,7 +526,17 @@ internal static class MappingEmitter
     {
         var core = EmitCore(mapping, sourceExpression, context);
 
-        if (!mapping.SourceType.IsNullableByNullability || IsNullableValueToNonNullableValue(mapping))
+        if (!mapping.SourceType.IsNullableByNullability ||
+            IsNullableValueToNonNullableValue(mapping))
+        {
+            return core;
+        }
+
+        if (mapping is AssignMapping
+            {
+                Kind: AssignmentKind.SameType or AssignmentKind.ImplicitConversion
+            } &&
+            mapping.TargetType.IsNullableByNullability)
         {
             return core;
         }
@@ -492,411 +552,237 @@ internal static class MappingEmitter
         string sourceExpression,
         EmitContext context)
     {
+        var kind = context == EmitContext.ExpressionTree
+            ? mapping.Plan.ExpressionTreeCreation
+            : mapping.Plan.MethodBodyCreation;
+
+        var itemsExpression = EmitProjectedItems(mapping, sourceExpression, context);
+
+        return kind switch
+        {
+            CollectionCreationKind.Array =>
+                $"global::System.Linq.Enumerable.ToArray<{mapping.ElementTypeName.Runtime}>({itemsExpression})",
+
+            CollectionCreationKind.List =>
+                $"global::System.Linq.Enumerable.ToList<{mapping.ElementTypeName.Runtime}>({itemsExpression})",
+
+            CollectionCreationKind.CollectionExpression =>
+                $"[.. {itemsExpression}]",
+
+            CollectionCreationKind.EnumerableConstructor =>
+                $"new {mapping.TargetType.Runtime}({itemsExpression})",
+
+            CollectionCreationKind.AddRangeClosure =>
+                EmitAddRangeClosure(mapping, sourceExpression, context),
+
+            CollectionCreationKind.AddLoopClosure =>
+                EmitAddLoopClosure(mapping, sourceExpression, context),
+
+            CollectionCreationKind.Unsupported =>
+                throw new MappingGenerationException(
+                    $"Cannot materialize collection '{mapping.TargetType.FullName}'."),
+
+            _ => throw new InvalidOperationException()
+        };
+    }
+
+    private static string EmitProjectedItems(
+    CollectionMapping mapping,
+    string sourceExpression,
+    EmitContext context)
+    {
         var itemMapping = EmitValue(
             mapping.ElementMapping,
             "__item",
             context);
 
-        var itemsExpression = itemMapping == "__item"
+        return itemMapping == "__item"
             ? sourceExpression
             : $"global::System.Linq.Enumerable.Select({sourceExpression}, static __item => {itemMapping})";
-
-        if (context == EmitContext.ExpressionTree)
-        {
-            return EmitCollectionMaterialization(mapping, itemsExpression);
-        }
-
-        if (CanUseCollectionExpression(mapping))
-        {
-            return $"[.. {itemsExpression}]";
-        }
-
-        if (mapping.Capabilities.HasAddRangeMethod || mapping.Capabilities.HasAddMethod)
-        {
-            return EmitCustomCollectionExpression(mapping, sourceExpression);
-        }
-
-        if (mapping.Capabilities.HasEnumerableConstructor)
-        {
-            return $"new {mapping.TargetType.Runtime}({itemsExpression})";
-        }
-
-        if (mapping.Capabilities.HasParameterlessConstructor)
-        {
-            return $"new {mapping.TargetType.Runtime}()";
-        }
-
-        throw new MappingGenerationException(
-            $"Cannot materialize collection '{mapping.TargetType.FullName}'.");
     }
 
-
-    private static string EmitCollectionMaterialization(
-        CollectionMapping mapping,
-        string itemsExpression)
-    {
-        var elementTypeName = mapping.ElementTypeName.Runtime;
-
-        if (mapping.Capabilities.IsArray)
-        {
-            return $"global::System.Linq.Enumerable.ToArray<{elementTypeName}>({itemsExpression})";
-        }
-
-        if (mapping.Capabilities.IsKnownCollectionInterface || mapping.Capabilities.IsGenericList)
-        {
-            return $"global::System.Linq.Enumerable.ToList<{elementTypeName}>({itemsExpression})";
-        }
-
-        if (mapping.Capabilities.HasEnumerableConstructor)
-        {
-            return $"new {mapping.TargetType.Runtime}({itemsExpression})";
-        }
-
-        if (mapping.Capabilities.HasParameterlessConstructor)
-        {
-            // Для expression tree нельзя делать statements с Add.
-            // Поэтому если нет конструктора от IEnumerable,
-            // безопаснее вернуть пустую коллекцию, если тип это допускает.
-            return $"new {mapping.TargetType.Runtime}()";
-        }
-
-        throw new MappingGenerationException(
-            $"Cannot materialize collection '{mapping.TargetType.FullName}' inside expression tree.");
-    }
-
-    private static IEnumerable<string> EmitCustomCollectionCreation(
-        CollectionMapping mapping,
-        string sourceExpression)
-    {
-        var targetType = mapping.TargetType.Runtime;
-
-        if (mapping.Capabilities.HasAddRangeMethod)
-        {
-            var itemMapping = EmitValue(
-                mapping.ElementMapping,
-                "__item",
-                EmitContext.MethodBody);
-
-            var itemsExpression = itemMapping == "__item"
-                ? sourceExpression
-                : $"global::System.Linq.Enumerable.Select({sourceExpression}, static __item => {itemMapping})";
-
-            yield return
-                $"var __mappedItems = global::System.Linq.Enumerable.ToList<{mapping.ElementTypeName.Runtime}>({itemsExpression});";
-
-            yield return $"var __result = new {targetType}();";
-            yield return "__result.AddRange(__mappedItems);";
-            yield return "return __result;";
-
-            yield break;
-        }
-
-        if (mapping.Capabilities.HasAddMethod)
-        {
-            var itemMapping = EmitValue(
-                mapping.ElementMapping,
-                "__item",
-                EmitContext.MethodBody);
-
-            yield return $"var __result = new {targetType}();";
-            yield return $"foreach (var __item in {sourceExpression})";
-            yield return "{";
-
-            if (itemMapping == "__item")
-            {
-                yield return "    __result.Add(__item);";
-            }
-            else
-            {
-                yield return $"    __result.Add({itemMapping});";
-            }
-
-            yield return "}";
-            yield return "return __result;";
-
-            yield break;
-        }
-
-        yield return $"var __result = new {targetType}();";
-        yield return "return __result;";
-    }
-
-
-
-    private static string EmitAggregate(
-    AggregateMapping mapping,
+    private static string EmitAddRangeClosure(
+    CollectionMapping mapping,
     string sourceExpression,
     EmitContext context)
     {
-        return mapping.Kind switch
-        {
-            AggregateKind.Count =>
-                EmitCount(mapping, sourceExpression),
-
-            AggregateKind.Any =>
-                EmitAny(mapping, sourceExpression),
-
-            AggregateKind.All =>
-                EmitAll(mapping, sourceExpression),
-
-            AggregateKind.Sum =>
-                EmitScalarAggregate("Sum", mapping, sourceExpression),
-
-            AggregateKind.Average =>
-                EmitScalarAggregate("Average", mapping, sourceExpression),
-
-            AggregateKind.Max =>
-                EmitScalarAggregate("Max", mapping, sourceExpression),
-
-            AggregateKind.Min =>
-                EmitScalarAggregate("Min", mapping, sourceExpression),
-
-            AggregateKind.First =>
-                EmitFirstOrLast("First", mapping, sourceExpression, context),
-
-            AggregateKind.Last =>
-                EmitFirstOrLast("Last", mapping, sourceExpression, context),
-
-            AggregateKind.FirstOrDefault =>
-                EmitFirstOrLast("FirstOrDefault", mapping, sourceExpression, context),
-
-            AggregateKind.LastOrDefault =>
-                EmitFirstOrLast("LastOrDefault", mapping, sourceExpression, context),
-
-            _ => throw new InvalidOperationException(
-                $"Unsupported aggregate kind '{mapping.Kind}'.")
-        };
-    }
-
-    private static string EmitCount(AggregateMapping mapping, string sourceExpression)
-    {
-        var result = mapping.SourceHasCountProperty
-            ? $"{sourceExpression}.Count"
-            : $"global::System.Linq.Enumerable.Count({sourceExpression})";
-
-        return ApplyAggregateResultMapping(mapping, result);
-    }
-
-    private static string EmitAny(AggregateMapping mapping, string sourceExpression)
-    {
-        if (mapping.Selector is null)
-        {
-            return ApplyAggregateResultMapping(
-                mapping,
-                $"global::System.Linq.Enumerable.Any({sourceExpression})");
-        }
-
-        var predicateBody = BuildAccessExpression("__item", mapping.Selector.Value);
-
-        return ApplyAggregateResultMapping(
-            mapping,
-            $"global::System.Linq.Enumerable.Any({sourceExpression}, static __item => {predicateBody})");
-    }
-
-    private static string EmitAll(AggregateMapping mapping, string sourceExpression)
-    {
-        var predicateBody = mapping.Selector is null
-            ? "__item"
-            : BuildAccessExpression("__item", mapping.Selector.Value);
-
-        return ApplyAggregateResultMapping(
-            mapping,
-            $"global::System.Linq.Enumerable.All({sourceExpression}, static __item => {predicateBody})");
-    }
-
-    private static string EmitScalarAggregate(
-    string methodName,
-    AggregateMapping mapping,
-    string sourceExpression)
-    {
-        if (mapping.Selector is null)
-        {
-            return
-                $"global::System.Linq.Enumerable.{methodName}({sourceExpression})";
-        }
-
-        var selectorBody = BuildAccessExpression("__item", mapping.Selector.Value);
+        var itemsExpression = EmitProjectedItems(mapping, "__source", context);
 
         return
-            $"global::System.Linq.Enumerable.{methodName}({sourceExpression}, static __item => {selectorBody})";
+            $"((global::System.Func<{mapping.SourceType.Runtime}, {mapping.TargetType.Runtime}>)" +
+            $"(static (__source) => {{ " +
+            $"var __mappedItems = global::System.Linq.Enumerable.ToList<{mapping.ElementTypeName.Runtime}>({itemsExpression}); " +
+            $"var __result = new {mapping.TargetType.Runtime}(); " +
+            $"__result.AddRange(__mappedItems); " +
+            $"return __result; " +
+            $"}}))({sourceExpression})";
     }
 
-    private static string EmitFirstOrLast(
-        string methodName,
+
+    private static string EmitAddLoopClosure(
+    CollectionMapping mapping,
+    string sourceExpression,
+    EmitContext context)
+    {
+        var itemMapping = EmitValue(
+            mapping.ElementMapping,
+            "__item",
+            context);
+
+        var addStatement = itemMapping == "__item"
+            ? "__result.Add(__item);"
+            : $"__result.Add({itemMapping});";
+
+        return
+            $"((global::System.Func<{mapping.SourceType.Runtime}, {mapping.TargetType.Runtime}>)" +
+            $"(static (__source) => {{ " +
+            $"var __result = new {mapping.TargetType.Runtime}(); " +
+            $"foreach (var __item in __source) {{ {addStatement} }} " +
+            $"return __result; " +
+            $"}}))({sourceExpression})";
+    }
+
+
+    private static string EmitAggregate(
         AggregateMapping mapping,
         string sourceExpression,
         EmitContext context)
     {
-        // Применяем предикат, если он есть.
-        //
-        // CustomerAddressesIsPrimaryFirstOrDefaultCity
-        // -> source.Customer.Addresses.Where(__item => __item.IsPrimary)
-        sourceExpression = ApplyPredicate(mapping, sourceExpression);
+        var sequence = sourceExpression;
 
-        // Новый сценарий с пост-агрегатным выражением:
-        //
-        // CustomerAddressesFirstOrDefaultCity
-        // CustomerAddressesFirstOrDefaultPropertySubCollectionCount
-        // CustomerAddressesIsPrimaryFirstOrDefaultPropertySubCollectionCount
-        if (mapping.PostSource is not null && mapping.PostMapping is not null)
+        if (mapping.Kind is AggregateKind.First
+                or AggregateKind.Last
+                or AggregateKind.FirstOrDefault
+                or AggregateKind.LastOrDefault &&
+            mapping.Predicate is { } predicate1)
         {
-            var postAccess = BuildAccessExpression("__item", mapping.PostSource.Value);
-
-            var postBody = EmitValue(
-                mapping.PostMapping,
-                postAccess,
-                context);
-
-            postBody = WrapIntermediateNullChecks(
-                "__item",
-                mapping.PostSource.Value,
-                mapping.PostMapping.TargetType,
-                postBody);
-
-            var projected =
-                $"global::System.Linq.Enumerable.Select<{mapping.ElementType.Runtime}, {mapping.TargetType.Runtime}>(" +
-                $"{sourceExpression}, static __item => {postBody})";
-
-            var result =
-                $"global::System.Linq.Enumerable.{methodName}({projected})";
-
-            return NormalizeFirstOrDefaultNullability(mapping, methodName, result);
+            sequence = EmitWhere(sequence, predicate1);
         }
 
-        // Старый вариант без селектора:
-        // ItemsFirst
-        // ItemsFirstOrDefault
-        if (mapping.Selector is null)
+        if (mapping.Kind is not (AggregateKind.Any or AggregateKind.All) &&
+            mapping.Projection is { } projection)
         {
-            if (mapping.ElementMapping is null)
-            {
-                return NormalizeFirstOrDefaultNullability(
-                    mapping,
-                    methodName,
-                    $"global::System.Linq.Enumerable.{methodName}({sourceExpression})");
-            }
-
-            var elementExpression = EmitValue(
-                mapping.ElementMapping,
-                "__item",
-                context);
-
-            if (elementExpression == "__item")
-            {
-                return NormalizeFirstOrDefaultNullability(
-                    mapping,
-                    methodName,
-                    $"global::System.Linq.Enumerable.{methodName}({sourceExpression})");
-            }
-
-            return NormalizeFirstOrDefaultNullability(
-                mapping,
-                methodName,
-                $"global::System.Linq.Enumerable.{methodName}(" +
-                $"global::System.Linq.Enumerable.Select({sourceExpression}, static __item => {elementExpression}))");
+            sequence = EmitSelect(sequence, projection, context);
         }
 
-        // Старый вариант с простым селектором:
-        // ItemsNameFirstOrDefault
-        var selectorExpression = BuildAccessExpression("__item", mapping.Selector.Value);
-
-        var projectedSelector =
-            $"global::System.Linq.Enumerable.Select({sourceExpression}, static __item => {selectorExpression})";
-
-        var resultSelector =
-            $"global::System.Linq.Enumerable.{methodName}({projectedSelector})";
-
-        return ApplyAggregateResultMapping(mapping, resultSelector);
-    }
-
-    private static string NormalizeFirstOrDefaultNullability(
-    AggregateMapping mapping,
-    string methodName,
-    string expression)
-    {
-        if (methodName is "FirstOrDefault" or "LastOrDefault" &&
-            mapping.TargetType.IsReference &&
-            !mapping.TargetType.IsNullableByNullability)
+        var result = mapping.Kind switch
         {
-            return $"({expression})!";
+            AggregateKind.Count when mapping.UseCountProperty &&
+                                     mapping.Projection is null &&
+                                     mapping.Predicate is null =>
+                $"{sequence}.Count",
+
+            AggregateKind.Count =>
+                $"global::System.Linq.Enumerable.Count({sequence})",
+
+            AggregateKind.Any when mapping.Predicate is { } predicate2 =>
+                $"global::System.Linq.Enumerable.Any({sequence}, static __item => {EmitPredicateBody(predicate2)})",
+
+            AggregateKind.Any =>
+                $"global::System.Linq.Enumerable.Any({sequence})",
+
+            AggregateKind.All when mapping.Predicate is { } predicate3 =>
+                $"global::System.Linq.Enumerable.All({sequence}, static __item => {EmitPredicateBody(predicate3)})",
+
+            AggregateKind.All =>
+                $"global::System.Linq.Enumerable.All({sequence}, static __item => __item)",
+
+            AggregateKind.Sum =>
+                $"global::System.Linq.Enumerable.Sum({sequence})",
+
+            AggregateKind.Average =>
+                $"global::System.Linq.Enumerable.Average({sequence})",
+
+            AggregateKind.Max =>
+                $"global::System.Linq.Enumerable.Max({sequence})",
+
+            AggregateKind.Min =>
+                $"global::System.Linq.Enumerable.Min({sequence})",
+
+            AggregateKind.First =>
+                $"global::System.Linq.Enumerable.First({sequence})",
+
+            AggregateKind.Last =>
+                $"global::System.Linq.Enumerable.Last({sequence})",
+
+            AggregateKind.FirstOrDefault =>
+                $"global::System.Linq.Enumerable.FirstOrDefault({sequence})",
+
+            AggregateKind.LastOrDefault =>
+                $"global::System.Linq.Enumerable.LastOrDefault({sequence})",
+
+            _ => throw new InvalidOperationException(
+                $"Unsupported aggregate kind '{mapping.Kind}'.")
+        };
+
+        if (mapping.RequiresNullForgiving)
+        {
+            result = $"({result})!";
         }
 
-        return expression;
-    }
-
-    private static string ApplyAggregateResultMapping(
-    AggregateMapping mapping,
-    string expression)
-    {
         if (mapping.ResultMapping is null)
         {
-            return expression;
+            return result;
         }
 
-        // Важно: используем EmitCore, а не EmitValue,
-        // чтобы не дублировать агрегатное выражение в null-check.
-        return EmitCore(
-            mapping.ResultMapping,
-            expression,
-            EmitContext.ExpressionTree);
+        return EmitCore(mapping.ResultMapping, result, context);
     }
 
-    private static string ApplyPredicate(
-    AggregateMapping mapping,
-    string sourceExpression)
+    private static string EmitPredicateBody(AggregatePredicate predicate)
     {
-        if (mapping.Predicate is null)
-        {
-            return sourceExpression;
-        }
+        var body = BuildAccessExpression("__item", predicate.Path);
 
-        var predicateBody = BuildAccessExpression("__item", mapping.Predicate.Value);
-
-        // Если промежуточные объекты в предикате nullable,
-        // при null возвращаем false.
-        predicateBody = WrapIntermediateNullChecks(
+        return WrapIntermediateNullChecks(
             "__item",
-            mapping.Predicate.Value,
+            predicate.Path,
             "false",
-            predicateBody);
-
-        return
-            $"global::System.Linq.Enumerable.Where({sourceExpression}, static __item => {predicateBody})";
+            body);
     }
 
-    private static string EmitCustomCollectionExpression(
-    CollectionMapping mapping,
-    string sourceExpression)
+    private static string EmitWhere(string sequence, AggregatePredicate predicate)
     {
-        var sb = new StringBuilder();
+        var body = EmitPredicateBody(predicate);
 
-        sb.Append(
-            $"((global::System.Func<{mapping.SourceType.Runtime}, {mapping.TargetType.Runtime}>)(static (__source) => {{ ");
+        return $"global::System.Linq.Enumerable.Where({sequence}, static __item => {body})";
+    }
 
-        var first = true;
+    private static string EmitSelect(
+    string sequence,
+    AggregateProjection projection,
+    EmitContext context)
+    {
+        var accessExpression = projection.Path is null
+            ? "__item"
+            : BuildAccessExpression("__item", projection.Path.Value);
 
-        foreach (var statement in EmitCustomCollectionCreation(mapping, "__source"))
+        var body = EmitValue(
+            projection.Mapping,
+            accessExpression,
+            context);
+
+        if (projection.Path is { } path)
         {
-            if (!first)
-            {
-                sb.Append(' ');
-            }
-
-            sb.Append(statement.Trim());
-            first = false;
+            body = WrapIntermediateNullChecks(
+                "__item",
+                path,
+                projection.Mapping.TargetType,
+                body);
         }
 
-        sb.Append($" }}))({sourceExpression})");
+        if (body == "__item")
+        {
+            return sequence;
+        }
 
-        return sb.ToString();
+        return $"global::System.Linq.Enumerable.Select({sequence}, static __item => {body})";
     }
 
-    private static bool CanUseCollectionExpression(CollectionMapping mapping)
+    private static bool IsIdentityCollectionMapping(CollectionMapping mapping)
     {
-        return mapping.Capabilities.IsArray
-            || mapping.Capabilities.IsKnownCollectionInterface
-            || mapping.Capabilities.IsGenericList
-            || mapping.Capabilities.HasAddMethod;
+        return mapping.ElementMapping is AssignMapping
+        {
+            Kind: AssignmentKind.SameType
+        };
     }
 
     // ------------------------------------------------------------------
@@ -906,7 +792,7 @@ internal static class MappingEmitter
     {
         var sb = new StringBuilder(rootExpression);
 
-        foreach (var segment in path.Segments.AsImmutableArray())
+        foreach (var segment in path.Segments)
         {
             sb.Append('.').Append(segment.MemberName);
         }
@@ -923,7 +809,7 @@ internal static class MappingEmitter
 
         for (var i = 0; i <= index; i++)
         {
-            sb.Append('.').Append(path.Segments.AsImmutableArray()[i].MemberName);
+            sb.Append('.').Append(path.Segments[i].MemberName);
         }
 
         return sb.ToString();
@@ -949,7 +835,7 @@ internal static class MappingEmitter
     string mappedExpression)
     {
         var result = mappedExpression;
-        var segments = path.Segments.AsImmutableArray();
+        var segments = path.Segments;
 
         for (var i = segments.Length - 2; i >= 0; i--)
         {

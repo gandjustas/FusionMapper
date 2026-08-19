@@ -445,6 +445,7 @@ public class CoverageGapTests
         await Assert.That(result.Values).Contains("b");
     }
 
+#if !FUSION_MAPPER_SOURCE_GENERATOR
     [Test]
     public async Task Map_List_To_Collection_Without_Add_Or_AddRange_Throws()
     {
@@ -456,6 +457,8 @@ public class CoverageGapTests
         await Assert.That(() => source.Map().To<NoAddCollection<string>>())
             .Throws<MappingException>();
     }
+#endif
+
 
     #endregion
 

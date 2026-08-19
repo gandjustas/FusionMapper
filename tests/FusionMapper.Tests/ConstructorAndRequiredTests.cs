@@ -17,6 +17,7 @@ public class ConstructorAndRequiredTests
         await Assert.That(result.Age).IsEqualTo(30);
     }
 
+#if !FUSION_MAPPER_SOURCE_GENERATOR
     [Test]
     public async Task Map_To_Type_With_Missing_Constructor_Parameter_Throws()
     {
@@ -29,6 +30,8 @@ public class ConstructorAndRequiredTests
             source.Map().To<CtorMissingTarget>()
         ).Throws<MappingException>();
     }
+#endif
+
 
     [Test]
     public async Task Map_Record_To_Record()

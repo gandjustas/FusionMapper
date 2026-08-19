@@ -3,7 +3,7 @@ using Microsoft.CodeAnalysis;
 
 namespace FusionMapper.SourceGenerator;
 
-class SourceEmmiter
+static class SourceEmitter
 {
     static readonly string AssemblyName = System.Reflection.Assembly.GetExecutingAssembly().GetName().Name;
     static readonly string AssemblyVersion = System.Reflection.Assembly.GetExecutingAssembly().GetName().Version.ToString() ?? "1.0.0.0";
@@ -11,7 +11,6 @@ class SourceEmmiter
     {
         StringBuilder sb = new(input.Count * 300);
         AppendGenerateFileHeader(sb);
-        sb.AppendLine("#pragma warning disable CS8321"); // The local function 'Map__FusionMapper_Tests_ItemSource____To__FusionMapper_Tests_ItemTarget__' is declared but never used
         sb.AppendLine("#pragma warning disable CS8629"); // Suppress erors Nullable<T> -> T
         sb.AppendLine();
         sb.AppendLine($"namespace {AssemblyName};");
@@ -26,7 +25,6 @@ class SourceEmmiter
 
         sb.AppendLine("}");
         sb.AppendLine("#pragma warning restore CS8629");
-        sb.AppendLine("#pragma warning restore CS8321");
         return sb.ToString();
     }
 
@@ -38,7 +36,7 @@ class SourceEmmiter
         sb.AppendLine($"namespace {AssemblyName};");
         sb.AppendLine();
         sb.AppendLine($$"""
-            static file class Initalizer
+            static file class Initializer
             {
                 [global::System.Runtime.CompilerServices.UnsafeAccessor(global::System.Runtime.CompilerServices.UnsafeAccessorKind.StaticField, Name = "cache")]
                 static extern ref global::System.Collections.Concurrent.ConcurrentDictionary<(global::System.Type Source, global::System.Type Target), global::System.Linq.Expressions.LambdaExpression> GetCache(in global::FusionMapper.ExpressionRewriter c);
@@ -115,7 +113,6 @@ class SourceEmmiter
                     }
                 }
             }
-            #pragma warning disable CS8321
 
             namespace {{AssemblyName}}
             {
@@ -152,7 +149,6 @@ class SourceEmmiter
         sb.AppendLine("""
                 }
             }
-            #pragma warning restore CS8321
             """);
 
         return sb.ToString();
@@ -407,7 +403,7 @@ class SourceEmmiter
             _ => "Map"
         };
 
-        return $"{prefix}__{source.NullableAnnotatedIndentifier}__To__{target.NullableAnnotatedIndentifier}";
+        return $"{prefix}__{source.NullableAnnotatedIdentifier}__To__{target.NullableAnnotatedIdentifier}";
     }
 
 

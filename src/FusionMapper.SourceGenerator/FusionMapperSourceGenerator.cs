@@ -25,7 +25,7 @@ public sealed class FusionMapperInterceptorGenerator : IIncrementalGenerator
         defaultSeverity: DiagnosticSeverity.Error,
         isEnabledByDefault: true);
 
-    public static readonly DiagnosticDescriptor UnsupportedInEpressionTree = new(
+    public static readonly DiagnosticDescriptor UnsupportedInExpressionTree = new(
         id: "FMAP002",
         title: "Unsupported mapping inside expression tree",
         messageFormat: "Unsupported Map<{0}>().To<{1}>(existing) inside expression tree",
@@ -64,7 +64,7 @@ public sealed class FusionMapperInterceptorGenerator : IIncrementalGenerator
 
         context.RegisterImplementationSourceOutput(anonymousLocations, static (spc, diagnostic) =>
         {
-            spc.ReportDiagnostic(Diagnostic.Create(diagnostic.Descriptor, diagnostic.Location, diagnostic.MessageArgs));
+            spc.ReportDiagnostic(Diagnostic.Create(diagnostic.Descriptor, diagnostic.Location, diagnostic.MessageArgs.AsImmutableArray().OfType<object>().ToArray()));
         });
 
         var mapped = candidates
@@ -83,7 +83,7 @@ public sealed class FusionMapperInterceptorGenerator : IIncrementalGenerator
             if (!csharpSufficient) return;
             if (candidates.Length == 0) return;
 
-            var source = SourceEmmiter.EmitMappers([.. candidates.Distinct()]);
+            var source = SourceEmitter.EmitMappers([.. candidates.Distinct()]);
             spc.AddSource("FusionMapper.g.cs", SourceText.From(source, Encoding.UTF8));
 
         });
@@ -115,7 +115,7 @@ public sealed class FusionMapperInterceptorGenerator : IIncrementalGenerator
             if (!csharpSufficient) return;
             if (candidates.Length == 0) return;
 
-            var initalizerSource = SourceEmmiter.EmitInitializer(candidates, dotnetVersion);
+            var initalizerSource = SourceEmitter.EmitInitializer(candidates, dotnetVersion);
             spc.AddSource("FusionMapper.Initializer.g.cs", SourceText.From(initalizerSource, Encoding.UTF8));
 
         });
@@ -142,7 +142,7 @@ public sealed class FusionMapperInterceptorGenerator : IIncrementalGenerator
 
         var accessorFields =
             context.CompilationProvider
-            .Select(static (compilation, ct) => FusionAccessorMetadata.Resolve(compilation, ct))
+            .Select(static (compilation, ct) => FusionAccessorMetadata.Resolve(compilation))
             .WithTrackingName(TrackingNames.AccessorFields);
 
 
@@ -171,7 +171,7 @@ public sealed class FusionMapperInterceptorGenerator : IIncrementalGenerator
                     fields.ProjectionValueField));
             }
 
-            var interceptorStore = SourceEmmiter.EmitInterceptors(candidates, fields);
+            var interceptorStore = SourceEmitter.EmitInterceptors(candidates, fields);
             spc.AddSource("FusionMapper.Interceptors.g.cs", SourceText.From(interceptorStore, Encoding.UTF8));
         });
     }
@@ -236,10 +236,6 @@ public sealed class FusionMapperInterceptorGenerator : IIncrementalGenerator
                 return null;
 
             var location = ctx.Node.GetLocation();
-            //var span = location.GetLineSpan();
-            //var mappedSpan = location.GetMappedLineSpan();
-            //location = Location.Create(span.Path, location.SourceSpan, span.Span, mappedSpan.Path, mappedSpan.Span);
-
             var isInsideExpresionTree = IsInsideExpressionTree(ctx.SemanticModel, invocation, ct);
             if(sourceType.IsAnonymousType || targetType.IsAnonymousType)
             {
@@ -255,7 +251,11 @@ public sealed class FusionMapperInterceptorGenerator : IIncrementalGenerator
             {
                 if(kind == CallKind.SourceToExisting)
                 {
-                    diagnostics.Add(new (UnsupportedInEpressionTree, location, sourceType.ToDisplayString(SymbolDisplayFormat.CSharpShortErrorMessageFormat), targetType.ToDisplayString(SymbolDisplayFormat.CSharpShortErrorMessageFormat)));
+                    diagnostics.Add(new (
+                        UnsupportedInExpressionTree, 
+                        location, 
+                        sourceType.ToDisplayString(SymbolDisplayFormat.CSharpShortErrorMessageFormat), 
+                        targetType.ToDisplayString(SymbolDisplayFormat.CSharpShortErrorMessageFormat)));
                 }
                 else
                 {

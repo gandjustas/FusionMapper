@@ -22,7 +22,7 @@ record TypeModel(
     public bool CanBeNullRuntime =>
         IsReference || IsNullableValue;
 
-    public string NullableAnnotatedIndentifier => Annotation == NullableAnnotation.NotAnnotated ? SafeIdentifier : (SafeIdentifier + "_Nullable");
+    public string NullableAnnotatedIdentifier => Annotation == NullableAnnotation.NotAnnotated ? SafeIdentifier : (SafeIdentifier + "_Nullable");
 
 
     private static readonly SymbolDisplayFormat SignatureFormat = new(
