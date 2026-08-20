@@ -100,9 +100,8 @@ internal static class MappingEmitter
 
                     if (statements.Count == 0)
                     {
-                        yield return
-                            $"throw new global::FusionMapper.MappingException(\"Mapping into an existing instance of '{objectMapping.TargetType.FullName}' is not supported.\");";
-                        yield break;
+                        throw new MappingGenerationException(
+                            $"Mapping into an existing instance of '{objectMapping.TargetType.FullName}' is not supported.");
                     }
 
                     foreach (var statement in statements)

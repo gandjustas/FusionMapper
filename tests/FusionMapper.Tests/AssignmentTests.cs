@@ -239,6 +239,7 @@ public class AssignmentTests
         await Assert.That(ReferenceEquals(result.Values, originalCollection)).IsTrue();
     }
 
+#if !FUSION_MAPPER_SOURCE_GENERATOR
     [Test]
     public async Task NothingMapped_ForExistingTarget_ThrowsMappingException()
     {
@@ -267,6 +268,7 @@ public class AssignmentTests
 
         await Assert.That(result is not null).IsTrue();
     }
+#endif
 
     [Test]
     public async Task ImpossibleMember_IsSkipped_WhenOtherMembersAreMapped()

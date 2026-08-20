@@ -13,7 +13,7 @@ namespace FusionMapper.SourceGenerator;
 public sealed class FusionMapperInterceptorGenerator : IIncrementalGenerator
 {
 
-    static readonly ConditionalWeakTable<Compilation, MappingBuilder> cache = new ();
+    static readonly ConditionalWeakTable<Compilation, MappingBuilder> cache = new();
 
     public const string FusionSourceType = "FusionSource";
     public const string FusionProjectionType = "FusionProjection";
@@ -149,7 +149,7 @@ public sealed class FusionMapperInterceptorGenerator : IIncrementalGenerator
         context.RegisterImplementationSourceOutput(interceptable.Combine(interceptionEnabled).Combine(accessorFields),
         static (spc, input) =>
         {
-            var ((candidates, enabled),  fields) = input;
+            var ((candidates, enabled), fields) = input;
             if (!enabled) return;
             if (candidates.Length == 0) return;
 
@@ -179,119 +179,166 @@ public sealed class FusionMapperInterceptorGenerator : IIncrementalGenerator
     private static bool IsCandidate(SyntaxNode node, CancellationToken ct) =>
         node is InvocationExpressionSyntax
         {
+            ArgumentList.Arguments.Count: <= 1,
             Expression: MemberAccessExpressionSyntax
-            {
+            {                
                 Name.Identifier.Value: "To",
             }
         };
 
     private static RawCandidate? Transform(GeneratorSyntaxContext ctx, CancellationToken ct)
     {
-        if (ctx.Node is InvocationExpressionSyntax { Expression: MemberAccessExpressionSyntax { Name.Identifier.Value: "To" } } invocation
-            && ctx.SemanticModel.GetOperation(invocation, ct) is IInvocationOperation targetOperation
-            && targetOperation.TargetMethod is
+        if (ctx.Node is not InvocationExpressionSyntax
             {
-                Name: "To",
-                ContainingType:
+                Expression: MemberAccessExpressionSyntax
                 {
-                    Name: FusionSourceType or FusionProjectionType,
-                    ContainingNamespace: { Name: "FusionMapper", ContainingNamespace.IsGlobalNamespace: true }
-                } source,
-                Parameters: { Length: 0 or 1 } parameters,
-            }
-            && (source is { Name: FusionSourceType } || parameters is { Length: 0 })
-            && targetOperation.Instance?.Type is INamedTypeSymbol type
-            )
+                    Name.Identifier.ValueText: "To"
+                }
+            } invocation)
         {
-            CallKind kind;
-            if (source.Name == FusionSourceType)
+            return null;
+        }
+
+        if (invocation.ArgumentList.Arguments.Count > 1)
+        {
+            return null;
+        }
+
+        if (ctx.SemanticModel.GetSymbolInfo(invocation, ct).Symbol is not IMethodSymbol method)
+        {
+            return null;
+        }
+
+        if (method.Name != "To")
+        {
+            return null;
+        }
+
+        if (method.TypeArguments.Length != 1)
+        {
+            return null;
+        }
+
+        if (method.ContainingType is not INamedTypeSymbol containingType)
+        {
+            return null;
+        }
+
+        if (containingType.TypeArguments.Length != 1)
+        {
+            return null;
+        }
+
+        if (containingType.Name is not (
+            FusionSourceType or
+            FusionProjectionType))
+        {
+            return null;
+        }
+
+        if (!IsFusionMapperNamespace(containingType.ContainingNamespace))
+        {
+            return null;
+        }
+
+        CallKind kind;
+        if (containingType.Name == FusionSourceType)
+        {
+            if (method.Parameters.Length == 0)
             {
-                if (parameters.Length == 0)
-                {
-                    kind = CallKind.SourceTo;
-                }
-                else if (parameters.Length == 1)
-                {
-                    kind = CallKind.SourceToExisting;
-                }
-                else
-                {
-                    return null;
-                }
+                kind = CallKind.SourceTo;
             }
-            else if (source.Name == FusionProjectionType)
+            else if (method.Parameters.Length == 1)
             {
-                kind = CallKind.ProjectionTo;
+                kind = CallKind.SourceToExisting;
             }
             else
             {
                 return null;
             }
+        }
+        else if (containingType.Name == FusionProjectionType)
+        {
+            kind = CallKind.ProjectionTo;
+        }
+        else
+        {
+            return null;
+        }
 
 
-            var sourceType = type.TypeArguments[0];
-            var targetType = targetOperation.TargetMethod.TypeArguments[0];
+        var sourceType = containingType.TypeArguments[0];
+        var targetType = method.TypeArguments[0];
 
-            if (IsUnsupported(sourceType) || IsUnsupported(targetType))
-                return null;
+        if (IsUnsupported(sourceType) || IsUnsupported(targetType))
+            return null;
 
-            var location = ctx.Node.GetLocation();
-            var isInsideExpresionTree = IsInsideExpressionTree(ctx.SemanticModel, invocation, ct);
-            if(sourceType.IsAnonymousType || targetType.IsAnonymousType)
-            {
-                return new RawCandidate(
-                    kind, isInsideExpresionTree,
-                    null, null, null, null,
-                    ImmutableArray.Create(new GeneratorDiagnostic(AnonymousSourceRule, location))
-                );
-            }
-
-            List<GeneratorDiagnostic> diagnostics = [];
-            if(isInsideExpresionTree)
-            {
-                if(kind == CallKind.SourceToExisting)
-                {
-                    diagnostics.Add(new (
-                        UnsupportedInExpressionTree, 
-                        location, 
-                        sourceType.ToDisplayString(SymbolDisplayFormat.CSharpShortErrorMessageFormat), 
-                        targetType.ToDisplayString(SymbolDisplayFormat.CSharpShortErrorMessageFormat)));
-                }
-                else
-                {
-                    kind = CallKind.ProjectionTo;
-                }
-            }
-
-
-
-            var builder = cache.GetValue(ctx.SemanticModel.Compilation, key => new MappingBuilder(key));
-            Mapping? mapping = null;
-            EquatableArray<string>? code = null;
-            try
-            {
-                mapping = builder.Build(sourceType, targetType);
-                code = MappingEmitter.Emit(kind, mapping).ToImmutableArray();
-            }
-            catch (MappingGenerationException ex)
-            {
-                diagnostics.Add(new (IncompatibleMappingRule,
-                    location,
-                    sourceType.ToDisplayString(SymbolDisplayFormat.CSharpShortErrorMessageFormat),
-                    targetType.ToDisplayString(SymbolDisplayFormat.CSharpShortErrorMessageFormat),
-                    ex.Message));
-            }
-
-            var interceptLocation = ctx.SemanticModel.GetInterceptableLocation(invocation);
+        var location = ctx.Node.GetLocation();
+        var isInsideExpresionTree = IsInsideExpressionTree(ctx.SemanticModel, invocation, ct);
+        if (sourceType.IsAnonymousType || targetType.IsAnonymousType)
+        {
             return new RawCandidate(
                 kind, isInsideExpresionTree,
-                mapping?.SourceType, mapping?.TargetType,
-                interceptLocation,
-                code, diagnostics.ToImmutableArray()
-                );
-
+                null, null, null, null,
+                ImmutableArray.Create(new GeneratorDiagnostic(AnonymousSourceRule, location))
+            );
         }
-        return null;
+
+        List<GeneratorDiagnostic> diagnostics = [];
+        if (isInsideExpresionTree)
+        {
+            if (kind == CallKind.SourceToExisting)
+            {
+                diagnostics.Add(new(
+                    UnsupportedInExpressionTree,
+                    location,
+                    sourceType.ToDisplayString(SymbolDisplayFormat.CSharpShortErrorMessageFormat),
+                    targetType.ToDisplayString(SymbolDisplayFormat.CSharpShortErrorMessageFormat)));
+            }
+            else
+            {
+                kind = CallKind.ProjectionTo;
+            }
+        }
+
+
+
+        var builder = cache.GetValue(ctx.SemanticModel.Compilation, key => new MappingBuilder(key));
+        Mapping? mapping = null;
+        EquatableArray<string>? code = null;
+        try
+        {
+            mapping = builder.Build(sourceType, targetType);
+            code = MappingEmitter.Emit(kind, mapping).ToImmutableArray();
+        }
+        catch (MappingGenerationException ex)
+        {
+            diagnostics.Add(new(IncompatibleMappingRule,
+                location,
+                sourceType.ToDisplayString(SymbolDisplayFormat.CSharpShortErrorMessageFormat),
+                targetType.ToDisplayString(SymbolDisplayFormat.CSharpShortErrorMessageFormat),
+                ex.Message));
+        }
+
+        var interceptLocation = isInsideExpresionTree
+            ? null
+            : ctx.SemanticModel.GetInterceptableLocation(invocation);
+        return new RawCandidate(
+            kind, isInsideExpresionTree,
+            mapping?.SourceType, mapping?.TargetType,
+            interceptLocation,
+            code, diagnostics.ToImmutableArray()
+            );
+
+    }
+
+    private static bool IsFusionMapperNamespace(INamespaceSymbol? ns)
+    {
+        return ns is
+        {
+            Name: "FusionMapper",
+            ContainingNamespace.IsGlobalNamespace: true
+        };
     }
 
 
@@ -313,8 +360,32 @@ public sealed class FusionMapperInterceptorGenerator : IIncrementalGenerator
         return false;
     }
 
-    private static bool IsInsideExpressionTree(SemanticModel model, SyntaxNode node, CancellationToken ct)
+    private static bool IsInsideExpressionTree(
+        SemanticModel model,
+        SyntaxNode node,
+        CancellationToken ct)
     {
+        var maybeInside = false;
+
+        for (var current = node.Parent; current is not null; current = current.Parent)
+        {
+            if (current is AnonymousFunctionExpressionSyntax or QueryExpressionSyntax)
+            {
+                maybeInside = true;
+                break;
+            }
+
+            if (current is MemberDeclarationSyntax or AccessorDeclarationSyntax or AttributeSyntax)
+            {
+                return false;
+            }
+        }
+
+        if (!maybeInside)
+        {
+            return false;
+        }
+
         var insideQueryBodyClause = false;
 
         for (var current = node.Parent; current is not null; current = current.Parent)
@@ -327,19 +398,27 @@ public sealed class FusionMapperInterceptorGenerator : IIncrementalGenerator
             if (current is AnonymousFunctionExpressionSyntax lambda)
             {
                 var convertedType = model.GetTypeInfo(lambda, ct).ConvertedType;
+
                 if (IsExpressionOfT(convertedType))
+                {
                     return true;
+                }
             }
 
             if (current is QueryExpressionSyntax query && insideQueryBodyClause)
             {
                 var typeInfo = model.GetTypeInfo(query, ct);
+
                 if (IsQueryable(typeInfo.Type) || IsQueryable(typeInfo.ConvertedType))
+                {
                     return true;
+                }
             }
 
             if (current is MemberDeclarationSyntax or AccessorDeclarationSyntax or AttributeSyntax)
+            {
                 break;
+            }
         }
 
         return false;

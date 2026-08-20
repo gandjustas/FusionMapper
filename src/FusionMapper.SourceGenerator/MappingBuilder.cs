@@ -8,7 +8,7 @@ namespace FusionMapper.SourceGenerator;
 
 class MappingBuilder(Compilation compilation)
 {
-    private readonly Stack<(ITypeSymbol Source, ITypeSymbol Target)> path = new();
+    private readonly ConcurrentStack<(ITypeSymbol Source, ITypeSymbol Target)> path = new();
     private readonly ConcurrentDictionary<ITypeSymbol, TypeModel> typeModelCache = new (SymbolEqualityComparer.IncludeNullability);
 
     private readonly ConcurrentDictionary<ITypeSymbol, ImmutableArray<ReadableMember>> readableMembersCache =
@@ -477,8 +477,7 @@ class MappingBuilder(Compilation compilation)
         {
             IsGenericType: true
         } genericList && SymbolEqualityComparer.Default.Equals(
-            genericList.ConstructedFrom,
-            compilation.GetTypeByMetadataName("System.Collections.Generic.List`1"));
+            genericList.ConstructedFrom,listOfT);
 
         var isKnownCollectionInterface = IsKnownCollectionInterfaceSymbol(target);
 
@@ -922,7 +921,7 @@ class MappingBuilder(Compilation compilation)
                     }
 
                     if (!TryResolveMapping(
-                            compilation.GetSpecialType(SpecialType.System_Int32),
+                            int32Type,
                             targetType,
                             out var resultMapping))
                     {
@@ -969,7 +968,7 @@ class MappingBuilder(Compilation compilation)
                     }
 
                     if (!TryResolveMapping(
-                            compilation.GetSpecialType(SpecialType.System_Boolean),
+                            boolType,
                             targetType,
                             out var resultMapping))
                     {
@@ -1606,12 +1605,29 @@ class MappingBuilder(Compilation compilation)
         }
 
         path.Push((source, target));
-        return new PopScope(this);
+        return new PopScope(this, source, target);
     }
 
-    private readonly struct PopScope(MappingBuilder owner) : IDisposable
+    private readonly struct PopScope(MappingBuilder owner, ITypeSymbol source, ITypeSymbol target) : IDisposable
     {
-        public void Dispose() => owner.path.Pop();
+        public void Dispose()
+        {
+            while (true)
+            {
+                if(owner.path.TryPop(out var e))
+                {
+                    if(ReferenceEquals(e.Source, source) && ReferenceEquals(e.Target, target))
+                    {
+                        break;
+                    }
+#pragma warning disable S3877
+                    throw new InvalidOperationException();
+#pragma warning restore S3877
+                }
+            }
+            
+                
+        }
     }
 
 
