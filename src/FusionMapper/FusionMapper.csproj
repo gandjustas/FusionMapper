@@ -9,14 +9,38 @@
 		<AssemblyName>$(PackageId)</AssemblyName>
 		<RootNamespace>$(PackageId)</RootNamespace>
 		<SourceGenerator>$(PackageId).SourceGenerator</SourceGenerator>
-		<WarningsAsErrors>$(WarningsAsErrors);NU1605;Nullable</WarningsAsErrors>
 		<GeneratePackageOnBuild>false</GeneratePackageOnBuild>
+	    <PackageReadmeFile>README.NuGet.md</PackageReadmeFile>
+		<RepositoryUrl>https://github.com/gandjustas/FusionMapper</RepositoryUrl>
+		<RepositoryType>git</RepositoryType>
+		<PackageLicenseExpression>MIT</PackageLicenseExpression>
+		<Description>FusionMapper is a modern, developer-friendly, zero-configuration, high-performance object mapper.</Description>
+		<RepositoryType>git</RepositoryType>
+		<WarningsAsErrors>$(WarningsAsErrors);NU1605;Nullable</WarningsAsErrors>
 	</PropertyGroup>
 
 
 	<PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Release|AnyCPU'">
 		<TreatWarningsAsErrors>True</TreatWarningsAsErrors>
 	</PropertyGroup>
+
+	<Target Name="IncludeReadmeInPackage" BeforeTargets="_GetPackageFiles">
+		<PropertyGroup>
+			<_NugetReadme>$(IntermediateOutputPath)$(PackageReadmeFile)</_NugetReadme>
+		</PropertyGroup>
+
+		<!-- 1. Убираем строки между маркерами исключения -->
+		<RemoveTextBetweenMarkers 
+			Input="$(MSBuildThisFileDirectory)..\..\README.md"
+			Output="$(_NugetReadme)"
+		/>
+
+		<!-- 2. Включаем очищенный файл в пакет -->
+		<ItemGroup>
+			<None Include="$(_NugetReadme)" Pack="true" PackagePath="\" Visible="false" />
+		</ItemGroup>
+	</Target>
+
 
 	<Target Name="IncludeGeneratorInPackage" BeforeTargets="_GetPackageFiles">
 		<ItemGroup>
@@ -29,4 +53,27 @@
 			<None Include="$(PackageId).targets" Pack="true" PackagePath="build" Visible="true" />
 		</ItemGroup>
 	</Target>
+
+	<UsingTask
+		TaskName="RemoveTextBetweenMarkers"
+		TaskFactory="RoslynCodeTaskFactory"
+		AssemblyFile="$(MSBuildToolsPath)\Microsoft.Build.Tasks.Core.dll" >
+		<ParameterGroup>
+			<Input ParameterType="System.String" Required="true" />
+			<Output ParameterType="System.String" Required="true" />
+		</ParameterGroup>
+		<Task>
+			<Using Namespace="System"/>
+			<Using Namespace="System.IO"/>
+			<Using Namespace="System.Linq"/>
+			<Code Type="Fragment" Language="cs">
+			<![CDATA[
+				var Lines = File.ReadAllLines(Input);
+				File.WriteAllLines(Output, 
+					Lines.TakeWhile(s => s != "<!-- Begin exclude from NuGet readme. -->")
+						 .Concat(Lines.SkipWhile(s => s != "<!-- End exclude from NuGet readme. -->").Skip(1)));
+			]]>
+			</Code>
+		</Task>
+	</UsingTask>	
 </Project>
