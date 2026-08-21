@@ -10,13 +10,13 @@
 		<AssemblyName>$(PackageId)</AssemblyName>
 		<RootNamespace>$(PackageId)</RootNamespace>
 		<EnforceExtendedAnalyzerRules>true</EnforceExtendedAnalyzerRules>
-		<NoWarn>1701;1702;RSEXPERIMENTAL002</NoWarn>
+		<NoWarn>1701;1702;RSEXPERIMENTAL002;RS2008</NoWarn>
 		<WarningsAsErrors>$(WarningsAsErrors);NU1605;Nullable</WarningsAsErrors>
-		<IsPackable>true</IsPackable>
+		<IsPackable>false</IsPackable>
 	</PropertyGroup>
 
 	<PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Debug|AnyCPU'">
-		<NoWarn>$(NoWarn);RS2008</NoWarn>
+		<NoWarn>$(NoWarn)</NoWarn>
 	</PropertyGroup>
 	<PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Release|AnyCPU'">
 		<NoWarn>$(NoWarn);NU5128</NoWarn>
@@ -31,8 +31,6 @@
 
 	<ItemGroup>
 		<None Include="$(OutputPath)\$(AssemblyName).dll" Pack="true" PackagePath="analyzers/dotnet/cs" Visible="false" />
-		<None Include="$(PackageId).props" Pack="true" PackagePath="build" Visible="true" />
-		<None Include="$(PackageId).targets" Pack="true" PackagePath="build" Visible="true" />
 	</ItemGroup>
 
 

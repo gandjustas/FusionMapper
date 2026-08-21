@@ -5,6 +5,7 @@
 		<TargetFramework>net10.0</TargetFramework>
 		<ImplicitUsings>enable</ImplicitUsings>
 		<Nullable>enable</Nullable>
+		<IsPackable>false</IsPackable>
 		<EnableFusionMapperInterceptor>true</EnableFusionMapperInterceptor>
 		<InterceptorsPreviewNamespaces Condition="EnableFusionMapperInterceptor!='false'">$(InterceptorsPreviewNamespaces);FusionMapper.SourceGenerator</InterceptorsPreviewNamespaces>
 		<InterceptorsNamespaces  Condition="EnableFusionMapperInterceptor!='false'">$(InterceptorsNamespaces);FusionMapper.SourceGenerator</InterceptorsNamespaces>
