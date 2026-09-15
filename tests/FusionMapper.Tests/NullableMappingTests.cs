@@ -45,7 +45,7 @@ public class NullableMappingTests
     }
 
     [Test]
-    public async Task Map_Nullable_Reference_To_String_With_Null()
+    public async Task Map_Nullable_Reference_To_String_With_Null_Throws()
     {
         var source = new SourceWithNullable
         {
@@ -54,8 +54,7 @@ public class NullableMappingTests
             NullableString = null
         };
 
-        var result = source.Map().To<TargetWithNonNullable>();
-
-        await Assert.That((string?)result.NullableString).IsNull();
+        await Assert.That(() => source.Map().To<TargetWithNonNullable>())
+            .Throws<InvalidOperationException>();
     }
 }

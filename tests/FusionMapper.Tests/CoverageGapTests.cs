@@ -624,7 +624,7 @@ public class CoverageGapTests
         var target = new StringEnumTarget();
 
         await Assert.That(() => source.Map().To(target))
-            .Throws<ArgumentException>();
+            .Throws<MappingException>();
     }
 
     [Test]

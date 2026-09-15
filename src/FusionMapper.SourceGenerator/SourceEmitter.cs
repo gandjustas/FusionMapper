@@ -19,6 +19,15 @@ static class SourceEmitter
             [global::System.CodeDom.Compiler.GeneratedCodeAttribute("{{AssemblyName}}", "{{AssemblyVersion}}")]
             static class Generated
             {
+                [global::System.CodeDom.Compiler.GeneratedCodeAttribute("{{AssemblyName}}", "{{AssemblyVersion}}")]
+                internal static TEnum ParseEnum<TEnum>(string value) where TEnum : struct, global::System.Enum
+                {
+                    return global::System.Enum.TryParse(value, out TEnum __result)
+                        ? __result
+                        : throw new global::FusionMapper.MappingException(
+                            $"Cannot convert '{value}' to enum '{typeof(TEnum).FullName}'.");
+                }
+
             """);
         
         EmitMappers(sb, input);

@@ -70,6 +70,6 @@ public class EnumMappingTests
     {
         var source = new TargetWithEnumString { Color = "Invalid" };
         await Assert.That(() => source.Map().To<SourceWithEnum>())
-            .Throws<ArgumentException>();
+            .Throws<MappingException>();
     }
 }

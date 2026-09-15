@@ -126,6 +126,12 @@ readonly record struct MemberBinding
     /// Как вести себя при маппинге в существующий объект.
     /// </summary>
     public required MemberMutationKind MutationKind { get; init; }
+
+    /// <summary>
+    /// Исходный путь может дать null, а целевой член — non-nullable reference:
+    /// при эмите нужно добавить "?? throw".
+    /// </summary>
+    public required bool RequiresNullGuard { get; init; }
 }
 
 internal enum MemberMutationKind

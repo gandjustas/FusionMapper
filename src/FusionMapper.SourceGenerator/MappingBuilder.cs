@@ -8,6 +8,12 @@ namespace FusionMapper.SourceGenerator;
 
 class MappingBuilder(Compilation compilation)
 {
+    // Roslyn may run syntax Transform calls in parallel for the same Compilation,
+    // and the same cached MappingBuilder instance (see the ConditionalWeakTable in
+    // FusionMapperSourceGenerator) is then shared between those calls. The recursion
+    // path below is per-Build state, so Build must not run concurrently.
+    private readonly object buildGate = new();
+
     private readonly ConcurrentStack<(ITypeSymbol Source, ITypeSymbol Target)> path = new();
     private readonly ConcurrentDictionary<ITypeSymbol, TypeModel> typeModelCache = new (SymbolEqualityComparer.IncludeNullability);
 
@@ -52,29 +58,32 @@ class MappingBuilder(Compilation compilation)
 
     public Mapping Build(ITypeSymbol sourceSymbol, ITypeSymbol targetSymbol)
     {
-        var key = (sourceSymbol, targetSymbol);
+        lock (buildGate)
+        {
+            var key = (sourceSymbol, targetSymbol);
 
-        if (mappingsCache.TryGetValue(key, out var cached))
-        {
-            return cached;
-        }
+            if (mappingsCache.TryGetValue(key, out var cached))
+            {
+                return cached;
+            }
 
-        if (failedMappingsCache.ContainsKey(key))
-        {
-            throw new MappingGenerationException(
-                $"Cannot map '{sourceSymbol.ToDisplayString()}' to '{targetSymbol.ToDisplayString()}'.");
-        }
+            if (failedMappingsCache.ContainsKey(key))
+            {
+                throw new MappingGenerationException(
+                    $"Cannot map '{sourceSymbol.ToDisplayString()}' to '{targetSymbol.ToDisplayString()}'.");
+            }
 
-        try
-        {
-            var mapping = ResolveMapping(sourceSymbol, targetSymbol);
-            mappingsCache[key] = mapping;
-            return mapping;
-        }
-        catch (MappingGenerationException ex) when (ex is not RecursiveMappingGenerationException)
-        {
-            failedMappingsCache.TryAdd(key, 0);
-            throw;
+            try
+            {
+                var mapping = ResolveMapping(sourceSymbol, targetSymbol);
+                mappingsCache[key] = mapping;
+                return mapping;
+            }
+            catch (MappingGenerationException ex) when (ex is not RecursiveMappingGenerationException)
+            {
+                failedMappingsCache.TryAdd(key, 0);
+                throw;
+            }
         }
     }
 
@@ -214,19 +223,37 @@ class MappingBuilder(Compilation compilation)
 
             var mutationKind = DetermineMutationKind(member, valueMapping);
 
+            // A nullable source path assigned to a non-nullable reference member
+            // must fail the mapping instead of silently writing null.
+            var finalType = sourcePath.FinalType;
+            var targetIsNonNullableReference =
+                member.Type.IsReferenceType && member.Type.NullableAnnotation == NullableAnnotation.NotAnnotated;
+            var sourceMayBeNull =
+                finalType.IsReferenceType && finalType.NullableAnnotation != NullableAnnotation.NotAnnotated;
+
             bindings.Add(new MemberBinding
             {
                 TargetMemberName = member.Name,
                 Source = MaterializePath(sourcePath),
                 Value = valueMapping,
                 CanWrite = member.CanWrite,
-                MutationKind = mutationKind
+                MutationKind = mutationKind,
+                RequiresNullGuard = targetIsNonNullableReference && sourceMayBeNull
             });
 
             if (member.CanWrite)
             {
                 assignableMembers.Add(member.Name);
             }
+        }
+
+        // A source with readable members must not silently map to an object that
+        // receives none of them (e.g. List<int> -> class with an incompatible Add).
+        if (bindings.Count == 0 && GetReadableMembers(source).Length > 0)
+        {
+            throw new MappingGenerationException(
+                $"Cannot map '{source.ToDisplayString()}' to '{target.ToDisplayString()}': " +
+                "none of the source members could be matched to the target.");
         }
 
         var requiredMembers = GetRequiredMemberNames(target).ToImmutableArray();

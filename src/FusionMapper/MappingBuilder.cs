@@ -812,6 +812,16 @@ static class MappingBuilder
     {
 
         var bindings = BuildMemberAssignments(sourceExpr, sourceNullability, targetType, path).ToArray();
+
+        // A source with readable members must not silently map to an object that
+        // receives none of them (e.g. List<int> -> class with an incompatible Add).
+        if (bindings.Length == 0 && GetSourceMembers(sourceExpr.Type).Any())
+        {
+            throw new MappingException(
+                $"Cannot map '{sourceExpr.Type.FullName}' to '{targetType.FullName}': " +
+                "none of the source members could be matched to the target.");
+        }
+
         var assignedMembers = bindings.Select(m => m.Member);
         var requiredMembers = GetRequiredMemberNames(targetType);
         var needToAssign = requiredMembers.Except(assignedMembers).ToArray();
@@ -865,6 +875,10 @@ static class MappingBuilder
                     targetType: property.PropertyType, SafeNullability(property).WriteState,
                     path) is { } mappedExpr)
                 {
+                    mappedExpr = GuardNonNullableTarget(
+                        mappedExpr, nullability, property.PropertyType,
+                        SafeNullability(property).WriteState, $"{targetType.Name}.{property.Name}");
+
                     initializedNames.Add(property.Name);
                     yield return Expression.Bind(property, mappedExpr);
                     break;
@@ -889,11 +903,44 @@ static class MappingBuilder
                     field.FieldType, SafeNullability(field).WriteState,
                     path) is { } mappedExpr)
                 {
+                    mappedExpr = GuardNonNullableTarget(
+                        mappedExpr, nullability, field.FieldType,
+                        SafeNullability(field).WriteState, $"{targetType.Name}.{field.Name}");
+
                     yield return Expression.Bind(field, mappedExpr);
                     break;
                 }
             }
         }
+    }
+
+    // A nullable source expression assigned to a non-nullable reference member
+    // (e.g. FirstOrDefault over an empty collection) must fail the mapping
+    // instead of silently writing null.
+    private static Expression GuardNonNullableTarget(
+        Expression mappedExpr,
+        NullabilityState sourceNullability,
+        Type targetMemberType,
+        NullabilityState targetNullability,
+        string targetMemberName)
+    {
+        if (targetNullability != NullabilityState.NotNull ||
+            targetMemberType.IsValueType ||
+            sourceNullability == NullabilityState.NotNull ||
+            !CanBeNull(mappedExpr.Type) ||
+            !targetMemberType.IsAssignableFrom(mappedExpr.Type))
+        {
+            return mappedExpr;
+        }
+
+        return Expression.Coalesce(
+            mappedExpr,
+            Expression.Throw(
+                Expression.New(
+                    typeof(InvalidOperationException).GetConstructor([typeof(string)])!,
+                    Expression.Constant(
+                        $"Cannot map null to non-nullable member '{targetMemberName}'.")),
+                targetMemberType));
     }
 
     private static NewExpression? BuildConstructorCall(
@@ -1262,14 +1309,13 @@ static class MappingBuilder
         }
     }
 
-    private static UnaryExpression BuildStringToEnum(Expression source, Type enumType)
+    private static MethodCallExpression BuildStringToEnum(Expression source, Type enumType)
     {
-        var parsed = Expression.Call(
-            EnumParseMethod,
-            Expression.Constant(enumType, typeof(Type)),
-            source);
+        var parseMethod = typeof(EnumParser)
+            .GetMethod(nameof(EnumParser.Parse))!
+            .MakeGenericMethod(enumType);
 
-        return Expression.Convert(parsed, enumType);
+        return Expression.Call(parseMethod, source);
     }
 
     private static bool IsCollectionType(Type type, [NotNullWhen(true)] out Type? elementType)
@@ -1429,10 +1475,6 @@ static class MappingBuilder
 
     private static readonly MethodInfo ObjectToStringMethod =
         typeof(object).GetMethod(nameof(object.ToString), Type.EmptyTypes)!;
-
-    private static readonly MethodInfo EnumParseMethod =
-        typeof(Enum).GetMethod(nameof(Enum.Parse), [typeof(Type), typeof(string)])!;
-
 
     private static readonly NullabilityInfoContext NullabilityContext = new();
     private static readonly ConcurrentDictionary<(Type Target, Type Source), bool> TryConvertCache = [];

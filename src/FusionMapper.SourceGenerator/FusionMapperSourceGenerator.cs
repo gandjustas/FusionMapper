@@ -97,10 +97,18 @@ public sealed class FusionMapperInterceptorGenerator : IIncrementalGenerator
         IncrementalValueProvider<int> targetFrameworkProvider = context.AnalyzerConfigOptionsProvider
             .Select((options, _) =>
             {
-                if (options.GlobalOptions.TryGetValue("build_property.TargetFramework", out var tfm)
-                    && int.TryParse(tfm[3..tfm.IndexOf('.')], out var version))
+                // The TFM may have no dot separator ("net472", "net8") or no numeric
+                // major part at all ("netstandard2.0"), so parse defensively.
+                if (options.GlobalOptions.TryGetValue("build_property.TargetFramework", out var tfm))
                 {
-                    return version;
+                    var versionPart = tfm.StartsWith("net", StringComparison.Ordinal) ? tfm[3..] : tfm;
+                    var majorSeparator = versionPart.IndexOf('.');
+                    var majorPart = majorSeparator >= 0 ? versionPart[..majorSeparator] : versionPart;
+
+                    if (int.TryParse(majorPart, out var version))
+                    {
+                        return version;
+                    }
                 }
 
                 return 8;

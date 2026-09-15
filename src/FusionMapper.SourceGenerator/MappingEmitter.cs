@@ -435,8 +435,8 @@ internal static class MappingEmitter
 
             AssignmentKind.StringToEnum =>
                 mapping.TargetType.IsNullableValue
-                    ? $"({mapping.TargetType.Runtime})global::System.Enum.Parse<{mapping.TargetType.NullableUnderlyingRuntime}>({sourceExpression})"
-                    : $"global::System.Enum.Parse<{mapping.TargetType.Runtime}>({sourceExpression})",
+                    ? $"({mapping.TargetType.Runtime})Generated.ParseEnum<{mapping.TargetType.NullableUnderlyingRuntime}>({sourceExpression})"
+                    : $"Generated.ParseEnum<{mapping.TargetType.Runtime}>({sourceExpression})",
 
             _ => throw new InvalidOperationException(
                 $"Unsupported assignment kind '{mapping.Kind}'.")
@@ -511,11 +511,20 @@ internal static class MappingEmitter
             accessExpression,
             context);
 
-        return WrapIntermediateNullChecks(
+        var wrapped = WrapIntermediateNullChecks(
             rootExpression,
             binding.Source,
             binding.Value.TargetType,
             mappedValue);
+
+        if (binding.RequiresNullGuard && context == EmitContext.MethodBody)
+        {
+            return
+                $"({wrapped} ?? throw new global::System.InvalidOperationException(" +
+                $"\"Cannot map null to non-nullable member '{binding.TargetMemberName}'.\"))";
+        }
+
+        return wrapped;
     }
 
     private static string EmitValue(
@@ -716,7 +725,13 @@ internal static class MappingEmitter
 
         if (mapping.RequiresNullForgiving)
         {
-            result = $"({result})!";
+            // The target member is a non-nullable reference, so an empty collection
+            // must fail the mapping instead of silently assigning null.
+            // In expression trees a throw cannot be used (EF cannot translate it),
+            // so keep the previous null-forgiving behavior there.
+            result = context == EmitContext.MethodBody
+                ? $"({result} ?? throw new global::System.InvalidOperationException(\"Collection aggregate produced null for a non-nullable target member.\"))"
+                : $"({result})!";
         }
 
         if (mapping.ResultMapping is null)
@@ -868,9 +883,10 @@ internal static class MappingEmitter
             return $"new global::System.Nullable<{target.NullableUnderlyingRuntime}>()";
         }
 
-        return target.IsReference && !target.IsNullableByNullability
-            ? "default!"
-            : "default";
+        // Generated files are compiled with "#nullable enable", so a bare "default" for a
+        // reference type (including an oblivious one from a Nullable-disabled consumer)
+        // is typed as maybe-null and triggers CS8603/CS8604/CS8620 downstream.
+        return target.IsReference ? "default!" : "default";
     }
 
 
