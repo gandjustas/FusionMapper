@@ -4,9 +4,9 @@ using Microsoft.CodeAnalysis.Diagnostics;
 
 namespace FusionMapper.SourceGenerator.Tests;
 
-sealed class OptionsProvider : AnalyzerConfigOptionsProvider
+sealed class OptionsProvider(bool suppressUnmappedWarnings = false) : AnalyzerConfigOptionsProvider
 {
-    public override AnalyzerConfigOptions GlobalOptions { get; } = new Options();
+    public override AnalyzerConfigOptions GlobalOptions { get; } = new Options(suppressUnmappedWarnings);
 
     public override AnalyzerConfigOptions GetOptions(SyntaxTree tree)
     {
@@ -18,7 +18,7 @@ sealed class OptionsProvider : AnalyzerConfigOptionsProvider
         return GlobalOptions;
     }
 
-    private sealed class Options : AnalyzerConfigOptions
+    private sealed class Options(bool suppressUnmappedWarnings) : AnalyzerConfigOptions
     {
         public override bool TryGetValue(string key, [NotNullWhen(true)] out string? value)
         {
@@ -30,6 +30,11 @@ sealed class OptionsProvider : AnalyzerConfigOptionsProvider
             else if (key == "build_property.TargetFramework")
             {
                 value = "net10.0";
+                return true;
+            }
+            else if (key == "build_property.FusionMapperSuppressUnmappedWarnings")
+            {
+                value = suppressUnmappedWarnings ? "true" : "false";
                 return true;
             }
             else

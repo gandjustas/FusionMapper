@@ -1,5 +1,6 @@
 <Project>  
   <ItemGroup>
     <CompilerVisibleProperty Include="EnableFusionMapperInterceptor" />
+    <CompilerVisibleProperty Include="FusionMapperSuppressUnmappedWarnings" />
   </ItemGroup>
 </Project>

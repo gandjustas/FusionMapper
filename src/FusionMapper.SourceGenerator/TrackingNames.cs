@@ -10,4 +10,5 @@ static class TrackingNames
     public static string Mapped => nameof(Mapped);
     public static string Intercepted => nameof(Intercepted);
     public static string Initialized => nameof(Initialized);
+    public static string UnmappedWarningsSuppressed => nameof(UnmappedWarningsSuppressed);
 }

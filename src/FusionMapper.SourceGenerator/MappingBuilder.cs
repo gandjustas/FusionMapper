@@ -189,6 +189,7 @@ class MappingBuilder(Compilation compilation)
         INamedTypeSymbol target)
     {
         var bindings = ImmutableArray.CreateBuilder<MemberBinding>();
+        var unmappedMembers = ImmutableArray.CreateBuilder<string>();
         var assignableMembers = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
 
         foreach (var member in GetTargetMembers(target))
@@ -200,6 +201,13 @@ class MappingBuilder(Compilation compilation)
                     out var sourcePath,
                     out var valueMapping))
             {
+                // Член цели без источника: молча оставить default опасно,
+                // поэтому имя сохраняется для диагностики FMAP005.
+                if (member.CanWrite && !member.IsIgnored)
+                {
+                    unmappedMembers.Add(member.Name);
+                }
+
                 continue;
             }
 
@@ -269,13 +277,19 @@ class MappingBuilder(Compilation compilation)
             .Where(member => !constructor.AssignedMemberNames.Contains(member.TargetMemberName))
             .ToImmutableArray();
 
+        // Члены, заполненные конструктором (например, позиционные record'ы), не считаются непокрытыми.
+        var unmappedMemberNames = unmappedMembers
+            .Where(name => !constructor.AssignedMemberNames.Contains(name))
+            .ToImmutableArray();
+
         return new ObjectMapping
         {
             SourceType = typeModelCache.GetOrAdd(source, TypeModel.Create),
             TargetType = typeModelCache.GetOrAdd(target, TypeModel.Create),
             Constructor = constructor,
             Members = bindings.ToImmutable(),
-            CreationMembers = creationMembers
+            CreationMembers = creationMembers,
+            UnmappedMemberNames = unmappedMemberNames
         };
     }
 
@@ -1485,7 +1499,8 @@ class MappingBuilder(Compilation compilation)
                     IsInitOnlyProperty(property),
                     canRead,
                     canWrite,
-                    property.Type.IsValueType);
+                    property.Type.IsValueType,
+                    HasFusionMapperIgnoreAttribute(property));
             }
 
             foreach (var field in currentType.GetMembers().OfType<IFieldSymbol>())
@@ -1512,9 +1527,17 @@ class MappingBuilder(Compilation compilation)
                     IsInitOnly: false,
                     CanRead: true,
                     CanWrite: !field.IsReadOnly,
-                    field.Type.IsValueType);
+                    field.Type.IsValueType,
+                    HasFusionMapperIgnoreAttribute(field));
             }
         }
+    }
+
+    private static bool HasFusionMapperIgnoreAttribute(ISymbol symbol)
+    {
+        return symbol.GetAttributes().Any(attribute =>
+            attribute.AttributeClass is { } attributeClass &&
+            attributeClass.ToDisplayString() == "FusionMapper.FusionMapperIgnoreAttribute");
     }
 
     private static IEnumerable<string> GetRequiredMemberNamesCore(INamedTypeSymbol type)
@@ -1734,7 +1757,8 @@ class MappingBuilder(Compilation compilation)
         bool IsInitOnly,
         bool CanRead,
         bool CanWrite,
-        bool IsValueType);
+        bool IsValueType,
+        bool IsIgnored = false);
 
     private sealed class SymbolPairComparer : IEqualityComparer<(ITypeSymbol Source, ITypeSymbol Target)>
     {

@@ -273,6 +273,43 @@ FusionMapper validates your mappings at **compile time** and reports errors dire
 | **FMAP001** | Error | **Cannot generate mapping.** Thrown when types are incompatible, a `required` member cannot be mapped, or no suitable constructor is found. |
 | **FMAP002** | Error | **Unsupported mapping inside expression tree.** Thrown when trying to map to an *existing* object (e.g., `Map().To(existing)`) inside an `IQueryable` projection. |
 | **FMAP003** | Warning | **Anonymous source/target type.** Thrown when the source or target type is an anonymous type. |
+| **FMAP005** | Warning | **Target members have no matching source members.** Thrown when a settable target member cannot be filled from the source and would silently keep its default value (`0`, `null`, ...). Lists all affected members in a single diagnostic per call site. |
+
+### Unmapped target members (FMAP005)
+
+Since FusionMapper is strictly convention-based, a target member whose name does not match anything in the source graph
+would previously be **silently skipped** — the mapping compiles and runs, but the member keeps its default value.
+FMAP005 turns this into a visible warning:
+
+```text
+warning FMAP005: The following members of 'ProductDto' have no matching source members and will keep
+their default values: AvailableStock, RestockThreshold, ProductColor.
+```
+
+Members assigned through a constructor (e.g., positional records) are never reported.
+
+**Ways to resolve / suppress:**
+
+1. **Rename** the target member or the source member so the conventions match.
+2. **`[FusionMapperIgnore]`** — mark members that are intentionally not mapped:
+
+    ```csharp
+    public class ProductDto
+    {
+        public int AvailableStock { get; init; }
+
+        [FusionMapperIgnore]
+        public ProductColor ProductColor { get; init; }
+    }
+    ```
+
+3. **`FusionMapperSuppressUnmappedWarnings`** — suppress FMAP005 for the whole project:
+
+    ```xml
+    <PropertyGroup>
+      <FusionMapperSuppressUnmappedWarnings>true</FusionMapperSuppressUnmappedWarnings>
+    </PropertyGroup>
+    ```
 
 ---
 

@@ -49,6 +49,19 @@ public sealed class FusionMapperInterceptorGenerator : IIncrementalGenerator
         defaultSeverity: DiagnosticSeverity.Warning,
         isEnabledByDefault: true);
 
+    public static readonly DiagnosticDescriptor UnmappedTargetMembersRule = new(
+        id: "FMAP005",
+        title: "Target members have no matching source members",
+        messageFormat:
+            "The following members of '{0}' have no matching source members and will keep their default values: {1}. " +
+            "Rename the members, mark them with [FusionMapperIgnore], " +
+            "or set <FusionMapperSuppressUnmappedWarnings>true</FusionMapperSuppressUnmappedWarnings> to suppress.",
+        category: "FusionMapper",
+        defaultSeverity: DiagnosticSeverity.Warning,
+        isEnabledByDefault: true);
+
+    private const string UnmappedTargetMembersRuleId = "FMAP005";
+
 
     public void Initialize(IncrementalGeneratorInitializationContext context)
     {
@@ -62,8 +75,21 @@ public sealed class FusionMapperInterceptorGenerator : IIncrementalGenerator
         var anonymousLocations = candidates
             .SelectMany(static (c, _) => c.Diagnostics.AsImmutableArray());
 
-        context.RegisterImplementationSourceOutput(anonymousLocations, static (spc, diagnostic) =>
+        var unmappedWarningsSuppressed = context.AnalyzerConfigOptionsProvider
+            .Select(static (options, _) =>
+                options.GlobalOptions.TryGetValue("build_property.FusionMapperSuppressUnmappedWarnings", out var value)
+                && value.Equals("true", StringComparison.OrdinalIgnoreCase))
+            .WithTrackingName(TrackingNames.UnmappedWarningsSuppressed);
+
+        context.RegisterImplementationSourceOutput(anonymousLocations.Combine(unmappedWarningsSuppressed), static (spc, input) =>
         {
+            var (diagnostic, suppressed) = input;
+
+            if (suppressed && diagnostic.Descriptor.Id == UnmappedTargetMembersRuleId)
+            {
+                return;
+            }
+
             spc.ReportDiagnostic(Diagnostic.Create(diagnostic.Descriptor, diagnostic.Location, diagnostic.MessageArgs.AsImmutableArray().OfType<object>().ToArray()));
         });
 
@@ -326,6 +352,15 @@ public sealed class FusionMapperInterceptorGenerator : IIncrementalGenerator
                 sourceType.ToDisplayString(SymbolDisplayFormat.CSharpShortErrorMessageFormat),
                 targetType.ToDisplayString(SymbolDisplayFormat.CSharpShortErrorMessageFormat),
                 ex.Message));
+        }
+
+        if (mapping is ObjectMapping { UnmappedMemberNames.Length: > 0 } objectMapping)
+        {
+            diagnostics.Add(new(
+                UnmappedTargetMembersRule,
+                location,
+                targetType.ToDisplayString(SymbolDisplayFormat.CSharpShortErrorMessageFormat),
+                string.Join(", ", objectMapping.UnmappedMemberNames)));
         }
 
         var interceptLocation = isInsideExpresionTree

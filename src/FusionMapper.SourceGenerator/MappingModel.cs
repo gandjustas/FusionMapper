@@ -87,6 +87,13 @@ internal sealed record ObjectMapping : Mapping
     public required ImmutableArray<MemberBinding> Members { get; init; }
 
     public required ImmutableArray<MemberBinding> CreationMembers { get; init; }
+
+    /// <summary>
+    /// Публичные записываемые члены цели, для которых не нашлось источника
+    /// и которые не заполняются конструктором. Используется для диагностики FMAP005.
+    /// Члены с [FusionMapperIgnore] сюда не попадают.
+    /// </summary>
+    public required ImmutableArray<string> UnmappedMemberNames { get; init; }
 }
 
 readonly record struct SelectedConstructor
