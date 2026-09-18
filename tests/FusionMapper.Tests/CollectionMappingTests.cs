@@ -137,4 +137,48 @@ public class CollectionMappingTests
     {
         public string? ItemsNameFirstOrDefault { get; set; }
     }
+
+    [Test]
+    public async Task Map_Source_Array_To_Target_Array_With_Element_Conversion()
+    {
+        var source = new int[] { 1, 2, 3 };
+
+        var result = source.Map().To<long[]>();
+
+        await Assert.That(result.Length).IsEqualTo(3);
+        await Assert.That(result[2]).IsEqualTo(3L);
+    }
+
+    [Test]
+    public async Task Map_Source_IReadOnlyCollection_To_Array_With_Element_Conversion()
+    {
+        IReadOnlyCollection<int> source = new List<int> { 1, 2, 3 };
+
+        var result = source.Map().To<long[]>();
+
+        await Assert.That(result.Length).IsEqualTo(3);
+        await Assert.That(result[2]).IsEqualTo(3L);
+    }
+
+    [Test]
+    public async Task Map_Source_ICollection_To_Array_SameType()
+    {
+        ICollection<string> source = new List<string> { "A", "B" };
+
+        var result = source.Map().To<string[]>();
+
+        await Assert.That(result.Length).IsEqualTo(2);
+        await Assert.That(result[1]).IsEqualTo("B");
+    }
+
+    [Test]
+    public async Task Map_Source_List_To_List_SameType()
+    {
+        var source = new List<string> { "A", "B" };
+
+        var result = source.Map().To<List<string>>();
+
+        await Assert.That(result.Count).IsEqualTo(2);
+        await Assert.That(result[1]).IsEqualTo("B");
+    }
 }

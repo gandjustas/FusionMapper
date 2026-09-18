@@ -768,8 +768,8 @@ static class MappingBuilder
         {
             return BuildCollectionMapping(
                 sourceExpr,
-                sourceElementType!,
-                targetElementType!,
+                sourceElementType,
+                targetElementType,
                 targetType,
                 path);
         }
@@ -813,13 +813,18 @@ static class MappingBuilder
 
         var bindings = BuildMemberAssignments(sourceExpr, sourceNullability, targetType, path).ToArray();
 
-        // A source with readable members must not silently map to an object that
-        // receives none of them (e.g. List<int> -> class with an incompatible Add).
-        if (bindings.Length == 0 && GetSourceMembers(sourceExpr.Type).Any())
+        // A collection source mapping to a non-collection object would silently
+        // drop the entire payload. POCO sources with no matching members are fine:
+        // the target is created with default member values (see NothingMapped tests).
+        if (bindings.Length == 0 &&
+            GetSourceMembers(sourceExpr.Type).Any() &&
+            IsCollectionType(sourceExpr.Type, out _) &&
+            !IsCollectionType(targetType, out _))
         {
             throw new MappingException(
                 $"Cannot map '{sourceExpr.Type.FullName}' to '{targetType.FullName}': " +
-                "none of the source members could be matched to the target.");
+                "the source is a collection but the target is not a compatible collection, " +
+                "so no source data could be transferred.");
         }
 
         var assignedMembers = bindings.Select(m => m.Member);
@@ -867,7 +872,7 @@ static class MappingBuilder
         foreach (var property in settableOrInitOnlyProperties)
         {
             foreach (var (accessExpr, nullability)
-                in GetSourceMemberAccess(sourceExpr, sourceNullability, property.Name!))
+                in GetSourceMemberAccess(sourceExpr, sourceNullability, property.Name))
             {
                 using var guard = path.Push(property.PropertyType, accessExpr.Type);
                 if (BuildCreationBody(accessExpr,
@@ -896,7 +901,7 @@ static class MappingBuilder
         foreach (var field in publicFields)
         {
             foreach (var (accessExpr, nullability)
-                in GetSourceMemberAccess(sourceExpr, sourceNullability, field.Name!))
+                in GetSourceMemberAccess(sourceExpr, sourceNullability, field.Name))
             {
                 using var guard = path.Push(field.FieldType, accessExpr.Type);
                 if (BuildCreationBody(accessExpr, nullability,

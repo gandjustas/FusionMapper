@@ -1,0 +1,71 @@
+name: Release
+
+on:
+  push:
+    tags: [ 'v*' ]
+
+permissions:
+  contents: read
+
+env:
+  DOTNET_NOLOGO: true
+  DOTNET_CLI_TELEMETRY_OPTOUT: true
+
+jobs:
+  release:
+    name: Build, test, pack & publish
+    runs-on: ubuntu-latest
+    permissions:
+      id-token: write  # enable GitHub OIDC token issuance for this job
+  
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Setup .NET
+        uses: actions/setup-dotnet@v5
+        with:
+          dotnet-version: 10.0.x
+
+      - name: Get version from tag
+        id: version
+        run: |
+          tag="${GITHUB_REF_NAME}"
+          if [[ ! "$tag" =~ ^v[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?$ ]]; then
+            echo "Tag '$tag' is not a valid release tag (expected v1.2.3 or v1.2.3-prerelease)." >&2
+            exit 1
+          fi
+          echo "version=${tag#v}" >> "$GITHUB_OUTPUT"
+
+      - name: Build solution
+        run: dotnet build FusionMapper.slnx -c Release
+
+      - name: Test with interceptors
+        run: |
+          dotnet test tests/FusionMapper.Tests/FusionMapper.Tests.csproj -c Release
+          dotnet test tests/FusionMapper.SourceGenerator.Tests/FusionMapper.SourceGenerator.Tests.csproj -c Release
+
+      - name: Test without interceptors (runtime fallback)
+        run: dotnet test tests/FusionMapper.Tests/FusionMapper.Tests.csproj -c Release -p:EnableFusionMapperInterceptor=false
+
+      - name: Pack
+        run: dotnet pack src/FusionMapper/FusionMapper.csproj -c Release -p:Version=${{ steps.version.outputs.version }} -o artifacts
+
+      # Get a short-lived NuGet API key
+      - name: NuGet login (OIDC → temp API key)
+        uses: NuGet/login@v1
+        id: login
+        with:
+          user: gandjustas
+            
+      - name: Push to NuGet.org
+        run: >
+          dotnet nuget push "artifacts/*.nupkg"
+          --source https://api.nuget.org/v3/index.json
+          --api-key ${{steps.login.outputs.NUGET_API_KEY}}
+          --skip-duplicate
+
+      - name: Upload package artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: nuget-package
+          path: artifacts/*.nupkg

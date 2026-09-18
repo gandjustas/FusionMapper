@@ -50,6 +50,9 @@ class MappingBuilder(Compilation compilation)
     private readonly INamedTypeSymbol? listOfT =
         compilation.GetTypeByMetadataName("System.Collections.Generic.List`1");
 
+    private readonly INamedTypeSymbol? iCollectionOfT =
+        compilation.GetTypeByMetadataName("System.Collections.Generic.ICollection`1");
+
     private readonly INamedTypeSymbol int32Type =
         compilation.GetSpecialType(SpecialType.System_Int32);
 
@@ -137,7 +140,7 @@ class MappingBuilder(Compilation compilation)
 
         if (IsCollection(source, out var sourceElement) && IsCollection(target, out var targetElement))
         {
-            return ResolveCollectionMapping(source, target, sourceElement!, targetElement!);
+            return ResolveCollectionMapping(source, target, sourceElement, targetElement);
         }
 
         if (conversion.Exists && conversion.IsExplicit)
@@ -217,15 +220,15 @@ class MappingBuilder(Compilation compilation)
                 IsCollection(member.Type, out var targetElement) &&
                 IsCollection(sourcePath.FinalType, out var sourceElement))
             {
-                var plan = GetCollectionPlan(member.Type, targetElement!);
+                var plan = GetCollectionPlan(member.Type, targetElement);
 
                 if (!plan.IsArray && plan.Mutation != CollectionMutationKind.None)
                 {
                     valueMapping = ResolveCollectionMapping(
                         sourcePath.FinalType,
                         member.Type,
-                        sourceElement!,
-                        targetElement!);
+                        sourceElement,
+                        targetElement);
                 }
             }
 
@@ -405,7 +408,7 @@ class MappingBuilder(Compilation compilation)
     ImmutableArray<string> requiredMembers,
     out SelectedConstructor result)
     {
-        result = default!;
+        result = default;
 
         var arguments = ImmutableArray.CreateBuilder<ConstructorArgument>(constructor.Parameters.Length);
         var assignedNames = ImmutableHashSet.CreateBuilder<string>(StringComparer.OrdinalIgnoreCase);
@@ -491,14 +494,60 @@ class MappingBuilder(Compilation compilation)
     {
         var elementMapping = ResolveMapping(sourceElement, targetElement);
 
+        var plan = GetCollectionPlan(target, targetElement);
+
+        // План кешируется по целевому типу и не знает источник. Цикл с точной аллокацией
+        // нужен только при преобразовании элементов; однотипные SZ-массивы остаются на
+        // collection expression (компилятор сам даёт точноразмерную аллокацию и memmove),
+        // а источники-не-массивы (List<T> -> T[]) — тоже, spread работает с любым
+        // перечислением.
+        if (source is IArrayTypeSymbol { IsSZArray: true } &&
+            target is IArrayTypeSymbol { IsSZArray: true } &&
+            elementMapping is not AssignMapping { Kind: AssignmentKind.SameType })
+        {
+            plan = plan with { MethodBodyCreation = CollectionCreationKind.ArrayMapLoop };
+        }
+        else if (elementMapping is AssignMapping { Kind: AssignmentKind.SameType })
+        {
+            // Конструктор List<T>(IEnumerable<T>) делает точную аллокацию и bulk-копирование
+            // и для любых источников не медленнее collection expression.
+            if (target is INamedTypeSymbol { IsGenericType: true } targetList &&
+                SymbolEqualityComparer.Default.Equals(targetList.ConstructedFrom, listOfT))
+            {
+                plan = plan with { MethodBodyCreation = CollectionCreationKind.EnumerableConstructor };
+            }
+            // ICollection<T> -> T[]: bulk CopyTo вместо поэлементного переноса
+            // collection expression; аллокация точная в обоих случаях.
+            else if (target is IArrayTypeSymbol { IsSZArray: true } &&
+                     source is not IArrayTypeSymbol &&
+                     iCollectionOfT is { } iCollection &&
+                     ImplementsInterface(source, iCollection.Construct(sourceElement)))
+            {
+                plan = plan with { MethodBodyCreation = CollectionCreationKind.CopyToArray };
+            }
+        }
+        else if (target is IArrayTypeSymbol { IsSZArray: true } &&
+                 source is not IArrayTypeSymbol)
+        {
+            // Преобразование элементов из не-массивного источника: MapCollection
+            // с точной аллокацией по Count вместо Select-итератора collection expression.
+            plan = plan with { MethodBodyCreation = CollectionCreationKind.CollectionMapLoop };
+        }
+
         return new CollectionMapping
         {
             SourceType = typeModelCache.GetOrAdd(source, TypeModel.Create),
             TargetType = typeModelCache.GetOrAdd(target, TypeModel.Create),
             ElementTypeName = typeModelCache.GetOrAdd(targetElement, TypeModel.Create),
             ElementMapping = elementMapping,
-            Plan = GetCollectionPlan(target, targetElement)
+            Plan = plan
         };
+    }
+
+    private static bool ImplementsInterface(ITypeSymbol type, INamedTypeSymbol interfaceType)
+    {
+        return SymbolEqualityComparer.Default.Equals(type, interfaceType) ||
+               type.AllInterfaces.Any(i => SymbolEqualityComparer.Default.Equals(i, interfaceType));
     }
 
     private CollectionPlan GetCollectionPlan(ITypeSymbol target, ITypeSymbol elementType)
@@ -525,11 +574,6 @@ class MappingBuilder(Compilation compilation)
         var hasClear = HasPublicInstanceMethod(target, "Clear", parameterCount: 0);
         var hasAdd = HasPublicInstanceMethod(target, "Add", parameterCount: 1);
         var hasAddRange = HasPublicInstanceMethod(target, "AddRange", parameterCount: 1);
-
-        var hasParameterlessConstructor = target is INamedTypeSymbol namedTarget &&
-            namedTarget.InstanceConstructors.Any(c =>
-                c.DeclaredAccessibility == Accessibility.Public &&
-                c.Parameters.Length == 0);
 
         var enumerableOfElement = compilation
             .GetSpecialType(SpecialType.System_Collections_Generic_IEnumerable_T)
@@ -846,7 +890,7 @@ class MappingBuilder(Compilation compilation)
         if (!TryBuildLoweredAggregate(
                 kind,
                 resolvedCollectionPath,
-                elementType!,
+                elementType,
                 selectorSuffix,
                 trailingSelectorSuffix,
                 targetType,
@@ -1405,12 +1449,12 @@ class MappingBuilder(Compilation compilation)
 
     private ImmutableArray<TargetMemberInfo> GetTargetMembers(INamedTypeSymbol type)
     {
-        return targetMembersCache.GetOrAdd(type, static t => GetTargetMembersCore(t).ToImmutableArray());
+        return targetMembersCache.GetOrAdd(type, static t => [.. GetTargetMembersCore(t)]);
     }
 
     private ImmutableArray<string> GetRequiredMemberNames(INamedTypeSymbol type)
     {
-        return requiredMembersCache.GetOrAdd(type, static t => GetRequiredMemberNamesCore(t).ToImmutableArray());
+        return requiredMembersCache.GetOrAdd(type, static t => [.. GetRequiredMemberNamesCore(t)]);
     }
 
     private static IEnumerable<ReadableMember> GetReadableMembersCore(ITypeSymbol type)
@@ -1702,12 +1746,6 @@ class MappingBuilder(Compilation compilation)
             SpecialType.System_DateTime => true,
             _ => type.TypeKind == TypeKind.Enum,
         };
-    }
-
-    private static bool CanBeNullRuntime(ITypeSymbol type)
-    {
-        return type.IsReferenceType
-            || type.OriginalDefinition.SpecialType == SpecialType.System_Nullable_T;
     }
 
     private static ITypeSymbol UnwrapNullable(ITypeSymbol type)

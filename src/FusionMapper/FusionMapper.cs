@@ -44,6 +44,11 @@ public class FusionMapper<TSource, TTarget>
             return target;
         }
 
+        if (target is null)
+        {
+            return Map(source);
+        }
+
         assigner ??= (Func<TSource, TTarget, TTarget>)MappingBuilder.BuildAssignmentFuncLambda(typeof(TSource), typeof(TTarget)).Compile();
         return assigner(source, target);
     }

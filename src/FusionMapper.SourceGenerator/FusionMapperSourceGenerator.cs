@@ -25,12 +25,30 @@ public sealed class FusionMapperInterceptorGenerator : IIncrementalGenerator
         defaultSeverity: DiagnosticSeverity.Error,
         isEnabledByDefault: true);
 
+    // Runtime-fallback variant: the mapping is resolved at runtime (and throws
+    // MappingException), so a build failure is not justified.
+    public static readonly DiagnosticDescriptor IncompatibleMappingRuleRuntime = new(
+        id: "FMAP001",
+        title: "Cannot generate mapping",
+        messageFormat: "Cannot generate mapping from '{0}' to '{1}': {2}",
+        category: "FusionMapper",
+        defaultSeverity: DiagnosticSeverity.Warning,
+        isEnabledByDefault: true);
+
     public static readonly DiagnosticDescriptor UnsupportedInExpressionTree = new(
         id: "FMAP002",
         title: "Unsupported mapping inside expression tree",
         messageFormat: "Unsupported Map<{0}>().To<{1}>(existing) inside expression tree",
         category: "FusionMapper",
         defaultSeverity: DiagnosticSeverity.Error,
+        isEnabledByDefault: true);
+
+    public static readonly DiagnosticDescriptor UnsupportedInExpressionTreeRuntime = new(
+        id: "FMAP002",
+        title: "Unsupported mapping inside expression tree",
+        messageFormat: "Unsupported Map<{0}>().To<{1}>(existing) inside expression tree",
+        category: "FusionMapper",
+        defaultSeverity: DiagnosticSeverity.Warning,
         isEnabledByDefault: true);
 
     public static readonly DiagnosticDescriptor AnonymousSourceRule = new(
@@ -60,6 +78,8 @@ public sealed class FusionMapperInterceptorGenerator : IIncrementalGenerator
         defaultSeverity: DiagnosticSeverity.Warning,
         isEnabledByDefault: true);
 
+    private const string IncompatibleMappingRuleId = "FMAP001";
+    private const string UnsupportedInExpressionTreeRuleId = "FMAP002";
     private const string UnmappedTargetMembersRuleId = "FMAP005";
 
 
@@ -75,50 +95,9 @@ public sealed class FusionMapperInterceptorGenerator : IIncrementalGenerator
         var anonymousLocations = candidates
             .SelectMany(static (c, _) => c.Diagnostics.AsImmutableArray());
 
-        var unmappedWarningsSuppressed = context.AnalyzerConfigOptionsProvider
-            .Select(static (options, _) =>
-                options.GlobalOptions.TryGetValue("build_property.FusionMapperSuppressUnmappedWarnings", out var value)
-                && value.Equals("true", StringComparison.OrdinalIgnoreCase))
-            .WithTrackingName(TrackingNames.UnmappedWarningsSuppressed);
-
-        context.RegisterImplementationSourceOutput(anonymousLocations.Combine(unmappedWarningsSuppressed), static (spc, input) =>
-        {
-            var (diagnostic, suppressed) = input;
-
-            if (suppressed && diagnostic.Descriptor.Id == UnmappedTargetMembersRuleId)
-            {
-                return;
-            }
-
-            spc.ReportDiagnostic(Diagnostic.Create(diagnostic.Descriptor, diagnostic.Location, diagnostic.MessageArgs.AsImmutableArray().OfType<object>().ToArray()));
-        });
-
-        var mapped = candidates
-            .Where(static c => c.Source is { IsAnonymous: false } && c.Target is { IsAnonymous: false } && c.MappingCode.HasValue)
-            .Select(static (c, _) => new Mapped(c.Kind, c.Source!, c.Target!, c.MappingCode!.Value))
-            .Collect()
-            .WithTrackingName(TrackingNames.Mapped);
-
         var csharpSufficient = context.CompilationProvider
             .Select((x, _) => x is CSharpCompilation { LanguageVersion: LanguageVersion.Default or >= LanguageVersion.CSharp12 })
             .WithTrackingName(TrackingNames.CSharpVersion);
-
-        context.RegisterImplementationSourceOutput(mapped.Combine(csharpSufficient), static (spc, input) =>
-        {
-            var (candidates, csharpSufficient) = input;
-            if (!csharpSufficient) return;
-            if (candidates.Length == 0) return;
-
-            var source = SourceEmitter.EmitMappers([.. candidates.Distinct()]);
-            spc.AddSource("FusionMapper.g.cs", SourceText.From(source, Encoding.UTF8));
-
-        });
-
-        var initialized = candidates
-            .Where(static c => c.Source is { IsAnonymous: false } && c.Target is { IsAnonymous: false } && c.MappingCode.HasValue)
-            .Select(static (c, _) => new Initialized(c.Kind, c.Source!, c.Target!, c.IsInsideExpressionTree))
-            .Collect()
-            .WithTrackingName(TrackingNames.Initialized);
 
         IncrementalValueProvider<int> targetFrameworkProvider = context.AnalyzerConfigOptionsProvider
             .Select((options, _) =>
@@ -141,7 +120,69 @@ public sealed class FusionMapperInterceptorGenerator : IIncrementalGenerator
             })
             .WithTrackingName(TrackingNames.DotnetVersion);
 
+        var interceptionEnabledSetting = context.AnalyzerConfigOptionsProvider
+            .Select((x, _) =>
+                x.GlobalOptions.TryGetValue("build_property.EnableFusionMapperInterceptor", out var enableSwitch)
+                && !enableSwitch.Equals("false", StringComparison.Ordinal))
+            .WithTrackingName(TrackingNames.InterceptorsIsEnabled);
 
+        var interceptionEnabled = interceptionEnabledSetting
+                .Combine(csharpSufficient)
+                .Combine(targetFrameworkProvider)
+                .Select((t, _) => t.Left.Left && t.Left.Right && t.Right >= 9);
+
+        var unmappedWarningsSuppressed = context.AnalyzerConfigOptionsProvider
+            .Select(static (options, _) =>
+                options.GlobalOptions.TryGetValue("build_property.FusionMapperSuppressUnmappedWarnings", out var value)
+                && value.Equals("true", StringComparison.OrdinalIgnoreCase))
+            .WithTrackingName(TrackingNames.UnmappedWarningsSuppressed);
+
+        context.RegisterImplementationSourceOutput(anonymousLocations.Combine(interceptionEnabled).Combine(unmappedWarningsSuppressed), static (spc, input) =>
+        {
+            var ((diagnostic, interceptorsActive), suppressed) = input;
+
+            if (suppressed && diagnostic.Descriptor.Id == UnmappedTargetMembersRuleId)
+            {
+                return;
+            }
+
+            // With interceptors the generator owns the call site, so an impossible
+            // mapping is a compile error. Otherwise it is resolved by the runtime
+            // fallback (and throws MappingException) — only a warning is justified.
+            var descriptor = interceptorsActive
+                ? diagnostic.Descriptor
+                : diagnostic.Descriptor.Id switch
+                {
+                    IncompatibleMappingRuleId => IncompatibleMappingRuleRuntime,
+                    UnsupportedInExpressionTreeRuleId => UnsupportedInExpressionTreeRuntime,
+                    _ => diagnostic.Descriptor,
+                };
+
+            spc.ReportDiagnostic(Diagnostic.Create(descriptor, diagnostic.Location, diagnostic.MessageArgs.AsImmutableArray().OfType<object>().ToArray()));
+        });
+
+        var mapped = candidates
+            .Where(static c => c.Source is { IsAnonymous: false } && c.Target is { IsAnonymous: false } && c.MappingCode.HasValue)
+            .Select(static (c, _) => new Mapped(c.Kind, c.Source!, c.Target!, c.MappingCode!.Value))
+            .Collect()
+            .WithTrackingName(TrackingNames.Mapped);
+
+        context.RegisterImplementationSourceOutput(mapped.Combine(csharpSufficient), static (spc, input) =>
+        {
+            var (candidates, csharpSufficient) = input;
+            if (!csharpSufficient) return;
+            if (candidates.Length == 0) return;
+
+            var source = SourceEmitter.EmitMappers([.. candidates.Distinct()]);
+            spc.AddSource("FusionMapper.g.cs", SourceText.From(source, Encoding.UTF8));
+
+        });
+
+        var initialized = candidates
+            .Where(static c => c.Source is { IsAnonymous: false } && c.Target is { IsAnonymous: false } && c.MappingCode.HasValue)
+            .Select(static (c, _) => new Initialized(c.Kind, c.Source!, c.Target!, c.IsInsideExpressionTree))
+            .Collect()
+            .WithTrackingName(TrackingNames.Initialized);
 
         context.RegisterImplementationSourceOutput(initialized.Combine(csharpSufficient).Combine(targetFrameworkProvider), static (spc, input) =>
         {
@@ -153,19 +194,6 @@ public sealed class FusionMapperInterceptorGenerator : IIncrementalGenerator
             spc.AddSource("FusionMapper.Initializer.g.cs", SourceText.From(initalizerSource, Encoding.UTF8));
 
         });
-
-
-        var interceptionEnabledSetting = context.AnalyzerConfigOptionsProvider
-            .Select((x, _) =>
-                x.GlobalOptions.TryGetValue("build_property.EnableFusionMapperInterceptor", out var enableSwitch)
-                && !enableSwitch.Equals("false", StringComparison.Ordinal))
-            .WithTrackingName(TrackingNames.InterceptorsIsEnabled);
-
-
-        var interceptionEnabled = interceptionEnabledSetting
-                .Combine(csharpSufficient)
-                .Combine(targetFrameworkProvider)
-                .Select((t, _) => t.Left.Left && t.Left.Right && t.Right >= 9);
 
         var interceptable = candidates
             .Where(static c => c.Source is { IsAnonymous: false } && c.Target is { IsAnonymous: false } && c.Interceptable is not null && !c.IsInsideExpressionTree)

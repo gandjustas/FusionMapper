@@ -577,6 +577,15 @@ internal static class MappingEmitter
             CollectionCreationKind.CollectionExpression =>
                 $"[.. {itemsExpression}]",
 
+            CollectionCreationKind.ArrayMapLoop =>
+                EmitArrayMapLoop(mapping, sourceExpression, context),
+
+            CollectionCreationKind.CopyToArray =>
+                $"Generated.CopyCollection({sourceExpression})",
+
+            CollectionCreationKind.CollectionMapLoop =>
+                EmitCollectionMapLoop(mapping, sourceExpression, context),
+
             CollectionCreationKind.EnumerableConstructor =>
                 $"new {mapping.TargetType.Runtime}({itemsExpression})",
 
@@ -607,6 +616,49 @@ internal static class MappingEmitter
         return itemMapping == "__item"
             ? sourceExpression
             : $"global::System.Linq.Enumerable.Select({sourceExpression}, static __item => {itemMapping})";
+    }
+
+    // Массивы с несовпадающими типами элементов: точноразмерный целевой массив
+    // и цикл прямо в IIFE — без Select-итератора и делегатного вызова на элемент.
+    private static string EmitArrayMapLoop(
+    CollectionMapping mapping,
+    string sourceExpression,
+    EmitContext context)
+    {
+        var itemMapping = EmitValue(
+            mapping.ElementMapping,
+            "__item",
+            context);
+
+        return
+            $"((global::System.Func<{mapping.SourceType.Runtime}, {mapping.TargetType.Runtime}>)(static (__collection) => {{ " +
+            $"var __destination = new {mapping.ElementTypeName.Runtime}[__collection.Length]; " +
+            $"for (var __i = 0; __i < __collection.Length; __i++) {{ " +
+            $"var __item = __collection[__i]; " +
+            $"__destination[__i] = {itemMapping}; " +
+            $"}} " +
+            $"return __destination; " +
+            $"}}))({sourceExpression})";
+    }
+
+    private static string EmitCollectionMapLoop(
+    CollectionMapping mapping,
+    string sourceExpression,
+    EmitContext context)
+    {
+        var itemMapping = EmitValue(
+            mapping.ElementMapping,
+            "__item",
+            context);
+
+        // Явно типизированный делегат сохраняет контекст целевого типа для лямбды:
+        // неявные элементные конверсии (int -> long и т.п.), которые раньше обеспечивало
+        // присваивание в collection expression, иначе теряются и лямбда выводится
+        // с типом источника.
+        return
+            $"Generated.MapCollection({sourceExpression}, " +
+            $"new global::System.Func<{mapping.ElementMapping.SourceType.Runtime}, {mapping.ElementTypeName.Runtime}>" +
+            $"(static __item => {itemMapping}))";
     }
 
     private static string EmitAddRangeClosure(

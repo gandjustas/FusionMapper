@@ -75,6 +75,8 @@ public class GeneratorTest
                 .Select(a => MetadataReference.CreateFromFile(a.Location))
                 );
 
+        // System.Text.Json is not loaded into the test process, so reference it explicitly.
+        references.Add(MetadataReference.CreateFromFile(typeof(System.Text.Json.JsonElement).Assembly.Location));
         var usings = new[] {
                 "global using System;",
                 "global using System.Collections.Generic;",
@@ -89,9 +91,12 @@ public class GeneratorTest
                 "global using static TUnit.Core.HookType;",
             };
 
+        // The embedded sources are copies of the FusionMapper.Tests files that contain
+        // `#if !FUSION_MAPPER_SOURCE_GENERATOR` blocks; defining the symbol here keeps
+        // those blocks out, exactly as in the interceptor-mode FusionMapper.Tests build.
         return CSharpCompilation.Create(
             "TestAssembly",
-            sources.Concat(usings).Select(s => CSharpSyntaxTree.ParseText(s)),
+            sources.Concat(usings).Select(s => CSharpSyntaxTree.ParseText(s, CSharpParseOptions.Default.WithPreprocessorSymbols("FUSION_MAPPER_SOURCE_GENERATOR"))),
             references,
             new CSharpCompilationOptions(OutputKind.DynamicallyLinkedLibrary,
             nullableContextOptions: NullableContextOptions.Enable

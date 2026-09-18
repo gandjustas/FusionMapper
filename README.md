@@ -239,6 +239,8 @@ public class Target {
 // Generates: new Target(source.Name, source.Age) { Name = source.Name }
 ```
 
+An `init`-only or `required` member that cannot be filled from the source is reported as FMAP001 at build time (a compile error when interceptors are active, otherwise a warning) and throws `MappingException` at runtime, listing the members that could not be assigned (see §5).
+
 ### 3.8. Type Conversions & Nullable Value Types
 
 Handles implicit/explicit casts, Enum <-> String, Enum <-> Int, and safely unwraps/wraps `Nullable<T>`.
@@ -266,14 +268,17 @@ public class Target { public string Status { get; set; } = ""; public int IntVal
 
 ## 📊 5. Source Generator Diagnostics
 
-FusionMapper validates your mappings at **compile time** and reports errors directly in your IDE via Roslyn diagnostics.
+FusionMapper validates your mappings at **compile time** and reports diagnostics directly in your IDE via Roslyn diagnostics.
 
 | Code | Severity | Description |
 | :--- | :--- | :--- |
-| **FMAP001** | Error | **Cannot generate mapping.** Thrown when types are incompatible, a `required` member cannot be mapped, or no suitable constructor is found. |
-| **FMAP002** | Error | **Unsupported mapping inside expression tree.** Thrown when trying to map to an *existing* object (e.g., `Map().To(existing)`) inside an `IQueryable` projection. |
-| **FMAP003** | Warning | **Anonymous source/target type.** Thrown when the source or target type is an anonymous type. |
-| **FMAP005** | Warning | **Target members have no matching source members.** Thrown when a settable target member cannot be filled from the source and would silently keep its default value (`0`, `null`, ...). Lists all affected members in a single diagnostic per call site. |
+| **FMAP001** | Error¹ / Warning¹ | **Cannot generate mapping.** Reported when types are incompatible or no suitable constructor is found. |
+| **FMAP002** | Error¹ / Warning¹ | **Unsupported mapping inside expression tree.** Reported when trying to map to an *existing* object (e.g., `Map().To(existing)`) inside an `IQueryable` projection. |
+| **FMAP003** | Warning | **Anonymous source/target type.** Reported when the source or target type is an anonymous type. |
+| **FMAP004** | Warning | **Cannot resolve backing field** for the `UnsafeAccessor` fast path; a fallback field name is used. |
+| **FMAP005** | Warning | **Target members have no matching source members.** Reported when a settable target member cannot be filled from the source and would silently keep its default value (`0`, `null`, ...). Lists all affected members in a single diagnostic per call site. |
+
+¹ **FMAP001/FMAP002 severity depends on who owns the call.** When the interceptor path is active (.NET 9+ by default, or unless disabled — see §6), the generator generates the mapping, so an impossible one is a compile **error**. When the call is resolved by the runtime fallback (interceptors disabled via `EnableFusionMapperInterceptor`, or on .NET 8), it is only a **warning** — the call compiles and fails fast at runtime with `MappingException`.
 
 ### Unmapped target members (FMAP005)
 
@@ -311,11 +316,39 @@ Members assigned through a constructor (e.g., positional records) are never repo
     </PropertyGroup>
     ```
 
+### When a mapping cannot be generated
+
+When the runtime fallback owns the call (interceptors disabled via `EnableFusionMapperInterceptor`, or on .NET 8), FMAP001/FMAP002 are **warnings**: the call site compiles and fails fast at runtime with `MappingException`. With the interceptor path active (.NET 9+ by default) the same diagnostics are compile-time **errors**.
+
+```csharp
+// 'Title' cannot reach the required 'Name' member:
+var dto = source.Map().To<RequiredTarget>();
+// Throws MappingException: Required members of type 'RequiredTarget' is not mapped: 'Name'.
+```
+
+Runtime rules for edge cases:
+
+| Scenario | Behavior |
+| :--- | :--- |
+| Creation (`To<T>()` or `To<T>(null)`) with no matching source members | Target is created with default member values (FMAP005 warns about them at build time). |
+| Creation from a **collection** source into a **non-collection** target | `MappingException` — the whole source payload would be silently dropped. |
+| Mapping into an **existing** object where nothing matches | `MappingException` (`Nothing were mapped from ...`). |
+| `Map().To(existing)` inside an `IQueryable` projection | `MappingException` (see FMAP002). |
+| Cyclic / recursive graphs | `MappingException` (see §4). |
+
 ---
 
 ## 🏗 6. What Code Does It Generate?
 
-Because FusionMapper uses **Source Generators** and **C# Interceptors**, it generates highly optimized, readable C# code at build time. There is **zero runtime reflection**.
+Because FusionMapper uses **Source Generators** and **C# Interceptors**, it generates highly optimized, readable C# code at build time. On **.NET 9+** the interceptor path has **zero runtime reflection**.
+
+On **.NET 8** (or when interceptors are explicitly disabled) generated mappers are pre-registered at startup via a `ModuleInitializer`, and only mappings the generator could not produce fall back to a runtime expression builder. You can disable interceptors explicitly:
+
+```xml
+<PropertyGroup>
+  <EnableFusionMapperInterceptor>false</EnableFusionMapperInterceptor>
+</PropertyGroup>
+```
 
 When you write:
 

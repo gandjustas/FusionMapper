@@ -28,6 +28,32 @@ static class SourceEmitter
                             $"Cannot convert '{value}' to enum '{typeof(TEnum).FullName}'.");
                 }
 
+                [global::System.CodeDom.Compiler.GeneratedCodeAttribute("{{AssemblyName}}", "{{AssemblyVersion}}")]
+                internal static TTarget[] MapCollection<TSource, TTarget>(global::System.Collections.Generic.IEnumerable<TSource> source, global::System.Func<TSource, TTarget> itemMapper)
+                {
+                    if (source is global::System.Collections.Generic.IReadOnlyCollection<TSource> knownSize)
+                    {
+                        var destination = new TTarget[knownSize.Count];
+                        var __i = 0;
+                        foreach (var __item in source)
+                        {
+                            destination[__i++] = itemMapper(__item);
+                        }
+                        return destination;
+                    }
+
+                    return global::System.Linq.Enumerable.ToArray(
+                        global::System.Linq.Enumerable.Select(source, itemMapper));
+                }
+
+                [global::System.CodeDom.Compiler.GeneratedCodeAttribute("{{AssemblyName}}", "{{AssemblyVersion}}")]
+                internal static T[] CopyCollection<T>(global::System.Collections.Generic.ICollection<T> source)
+                {
+                    var destination = new T[source.Count];
+                    source.CopyTo(destination, 0);
+                    return destination;
+                }
+
             """);
         
         EmitMappers(sb, input);
@@ -168,7 +194,11 @@ static class SourceEmitter
     {
         sb.AppendLine("#pragma warning disable CS8974"); // Suppress Converting method group 'method' to non-delegate type 'type'. Did you intend to invoke the method?
 
-        foreach (var (kind, source, target,  _) in candidates.Where(c => c.IsInsideExpressionTree))
+        // Only projections can be seeded into the cache: Project__X is an
+        // Expression<Func<..>> field. Map methods are plain delegates, and a
+        // method call inside a query tree would not translate to SQL anyway —
+        // the runtime builds the member-init lambda itself via BuildCreationLambda.
+        foreach (var (kind, source, target,  _) in candidates.Where(c => c.IsInsideExpressionTree && c.Kind == CallKind.ProjectionTo))
         {
             var methodName = $"global::{AssemblyName}.Generated." + GetMethodName(source, target, kind);
             Indent(sb, 2);

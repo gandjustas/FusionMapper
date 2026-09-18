@@ -1,0 +1,65 @@
+name: CI
+
+on:
+  pull_request:
+    branches: [ main ]
+  push:
+    branches: [ main ]
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  DOTNET_NOLOGO: true
+  DOTNET_CLI_TELEMETRY_OPTOUT: true
+
+jobs:
+  build:
+    name: Build (Release)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Setup .NET
+        uses: actions/setup-dotnet@v5
+        with:
+          dotnet-version: 10.0.x
+
+      - name: Build solution
+        run: dotnet build FusionMapper.slnx -c Release
+
+  test:
+    name: Tests (interceptors ${{ matrix.interceptors == 'true' && 'on' || 'off' }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        # 'true' — interceptor mode: generator + runtime suites.
+        # 'false' — runtime fallback mode (no interceptors, no generator).
+        interceptors: [ 'true', 'false' ]
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Setup .NET
+        uses: actions/setup-dotnet@v5
+        with:
+          dotnet-version: 10.0.x
+
+      - name: Test with interceptors
+        if: matrix.interceptors == 'true'
+        run: |
+          dotnet test tests/FusionMapper.Tests/FusionMapper.Tests.csproj -c Release
+          dotnet test tests/FusionMapper.SourceGenerator.Tests/FusionMapper.SourceGenerator.Tests.csproj -c Release
+
+      - name: Test without interceptors (runtime fallback)
+        if: matrix.interceptors == 'false'
+        run: dotnet test tests/FusionMapper.Tests/FusionMapper.Tests.csproj -c Release -p:EnableFusionMapperInterceptor=false
+
+      - name: Upload test results
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: test-results-interceptors-${{ matrix.interceptors }}
+          path: TestResults/
+          if-no-files-found: ignore

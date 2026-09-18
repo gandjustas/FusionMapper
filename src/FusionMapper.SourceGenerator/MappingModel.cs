@@ -203,6 +203,26 @@ internal enum CollectionCreationKind
     /// IIFE/выражение с Add.
     /// </summary>
     AddLoopClosure,
+
+    /// <summary>
+    /// Точноразмерный новый массив + цикл с поэлементным маппингом.
+    /// Для однотипных массивов используется CollectionExpression:
+    /// компилятор знает длину и сам опускает spread в точноразмерную
+    /// аллокацию и memmove, так что Array.Copy не даёт выигрыша.
+    /// </summary>
+    ArrayMapLoop,
+
+    /// <summary>
+    /// ICollection.CopyTo в точноразмерный новый массив (однотипные элементы,
+    /// источник-не-массив): bulk-копирование вместо поэлементного переноса.
+    /// </summary>
+    CopyToArray,
+
+    /// <summary>
+    /// Преобразование элементов из источника-не-массива в точноразмерный новый
+    /// массив: MapCollection с Count-фастпасом вместо Select-итератора.
+    /// </summary>
+    CollectionMapLoop,
 }
 
 internal enum CollectionMutationKind
