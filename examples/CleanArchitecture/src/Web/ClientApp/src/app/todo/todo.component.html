@@ -1,0 +1,176 @@
+<hgroup>
+  <h1>Tasks</h1>
+  <p>Manage your todo lists and tasks.</p>
+</hgroup>
+
+@if (!lists()) {
+  <span aria-busy="true">Loading&hellip;</span>
+} @else {
+  <div class="todo-layout">
+
+    <!-- Sidebar -->
+    <div class="todo-sidebar">
+      <div class="todo-panel-header">
+        <h2>Lists</h2>
+        <button class="icon-btn" (click)="showNewListDialog()"><lucide-icon name="plus" [size]="20" [strokeWidth]="2" /></button>
+      </div>
+      <ul>
+        @for (list of lists(); track $index) {
+          <li [attr.aria-current]="selectedList() === list ? 'true' : null"
+              (click)="selectedListId.set(list.id)">
+            <span class="colour-dot" [style.background]="list.colour" aria-hidden="true"></span>
+            <span>{{ list.title }}</span>
+            <small>{{ remainingItems(list) }}</small>
+          </li>
+        }
+      </ul>
+    </div>
+
+    <!-- Items panel -->
+    @if (selectedList()) {
+      <div class="todo-main">
+        <div class="todo-panel-header">
+          <h2 [style.color]="selectedList()!.colour">{{ selectedList()!.title }}</h2>
+          <button class="icon-btn" (click)="showListOptionsDialog()"><lucide-icon name="settings" [size]="20" [strokeWidth]="2" /></button>
+        </div>
+
+        @for (item of selectedList()!.items; track $index; let i = $index) {
+          <div class="todo-item">
+            <input type="checkbox" [(ngModel)]="item.done" (change)="updateItem(item)" />
+            @if (item === editingItem()) {
+              <input id="{{ 'itemTitle' + i }}" type="text" class="todo-item-input"
+                [(ngModel)]="item.title" (keyup.enter)="updateItem(item)"
+                (keyup.escape)="cancelEdit(); $event.target.blur()"
+                (blur)="editingItem() && updateItem(item)"
+                autofocus maxlength="200" />
+            } @else {
+              <span class="todo-item-text" [class.todo-done]="item.done"
+                (click)="editItem(item, 'itemTitle' + i)">{{ item.title }}</span>
+            }
+            @if (item.id !== 0) {
+              <button class="icon-btn" (click)="showItemDetailsDialog(item)"><lucide-icon name="more-horizontal" [size]="20" [strokeWidth]="2" /></button>
+            }
+          </div>
+        }
+
+        <div class="todo-item todo-new-item">
+          <input type="checkbox" disabled />
+          @if (addingItem()) {
+            <input id="newItemInput" type="text" class="todo-item-input"
+              [(ngModel)]="newItemTitle"
+              (keyup.enter)="commitNewItem()"
+              (keyup.escape)="cancelNewItem(); $event.target.blur()"
+              (blur)="addingItem() && commitNewItem()"
+              maxlength="200" />
+          } @else {
+            <span class="todo-item-text todo-new-item-placeholder" (click)="startAddingItem()">New task…</span>
+          }
+        </div>
+      </div>
+    }
+
+  </div>
+}
+
+<!-- New List dialog -->
+<dialog #newListDialog>
+  <article>
+    <header>
+      <h3>New List</h3>
+      <button rel="prev" aria-label="Close" (click)="newListCancelled()"></button>
+    </header>
+    <label for="title">Title</label>
+    <input type="text" id="title" placeholder="List title&hellip;" [(ngModel)]="newListEditor.title"
+      [attr.aria-invalid]="newListError() ? 'true' : null"
+      (keyup.enter)="addList()" maxlength="200" />
+    @if (newListError()) {
+      <small>{{ newListError() }}</small>
+    }
+    <label>Colour</label>
+    <div class="colour-picker">
+      @for (c of colours(); track c.code) {
+        <button type="button" class="colour-swatch"
+          [style.background]="c.code"
+          [class.selected]="newListEditor.colour === c.code"
+          [attr.aria-label]="c.name"
+          (click)="newListEditor.colour = c.code"></button>
+      }
+    </div>
+    <footer>
+      <button class="secondary" (click)="newListCancelled()">Cancel</button>
+      <button (click)="addList()">Create</button>
+    </footer>
+  </article>
+</dialog>
+
+<!-- List Options dialog -->
+<dialog #listOptionsDialog>
+  <article>
+    <header>
+      <h3>List Options</h3>
+      <button rel="prev" aria-label="Close" (click)="closeListOptionsDialog()"></button>
+    </header>
+    <label for="inputListTitle">Title</label>
+    <input type="text" id="inputListTitle" placeholder="List name&hellip;"
+      [(ngModel)]="listOptionsEditor.title" (keyup.enter)="updateListOptions()" maxlength="200" />
+    <label>Colour</label>
+    <div class="colour-picker">
+      @for (c of colours(); track c.code) {
+        <button type="button" class="colour-swatch"
+          [style.background]="c.code"
+          [class.selected]="listOptionsEditor.colour === c.code"
+          [attr.aria-label]="c.name"
+          (click)="listOptionsEditor.colour = c.code"></button>
+      }
+    </div>
+    <footer>
+      <button class="danger" style="margin-inline-end: auto" (click)="confirmDeleteList()">Delete</button>
+      <button class="secondary" (click)="closeListOptionsDialog()">Cancel</button>
+      <button (click)="updateListOptions()">Update</button>
+    </footer>
+  </article>
+</dialog>
+
+<!-- Delete List dialog -->
+<dialog #deleteListDialog>
+  <article>
+    <header>
+      <h3>Delete "{{ selectedList()?.title }}"?</h3>
+      <button rel="prev" aria-label="Close" (click)="closeDeleteListDialog()"></button>
+    </header>
+    <p>All items will be permanently deleted.</p>
+    <footer>
+      <button class="secondary" (click)="closeDeleteListDialog()">Cancel</button>
+      <button class="danger" style="--pico-background-color: var(--pico-del-color); --pico-border-color: var(--pico-del-color); --pico-color: #fff;" (click)="deleteListConfirmed()">Delete</button>
+    </footer>
+  </article>
+</dialog>
+
+<!-- Item Details dialog -->
+<dialog #itemDetailsDialog>
+  <article>
+    <header>
+      <h3>Item Details</h3>
+      <button rel="prev" aria-label="Close" (click)="closeItemDetailsDialog()"></button>
+    </header>
+    <label for="itemList">List</label>
+    <select id="itemList" [(ngModel)]="itemDetailsEditor.listId">
+      @for (list of lists(); track $index) {
+        <option [ngValue]="list.id">{{ list.title }}</option>
+      }
+    </select>
+    <label for="priority">Priority</label>
+    <select id="priority" [(ngModel)]="itemDetailsEditor.priority">
+      @for (level of priorityLevels(); track $index) {
+        <option [ngValue]="level.id">{{ level.title }}</option>
+      }
+    </select>
+    <label for="note">Note</label>
+    <textarea id="note" rows="3" [(ngModel)]="itemDetailsEditor.note"></textarea>
+    <footer>
+      <button class="danger" style="margin-inline-end: auto" (click)="deleteItem(selectedItem()!)">Delete</button>
+      <button class="secondary" (click)="closeItemDetailsDialog()">Cancel</button>
+      <button (click)="updateItemDetails()">Update</button>
+    </footer>
+  </article>
+</dialog>

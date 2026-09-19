@@ -29,6 +29,11 @@ jobs:
       - name: Build solution
         run: dotnet build FusionMapper.slnx -c Release
 
+      # The example consumes the published NuGet package (not the solution sources),
+      # so building it verifies that the pinned package version still compiles.
+      - name: Build example (published FusionMapper package)
+        run: dotnet build examples/CleanArchitecture -c Release
+
   test:
     name: Tests (interceptors ${{ matrix.interceptors == 'true' && 'on' || 'off' }})
     runs-on: ubuntu-latest

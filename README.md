@@ -423,8 +423,16 @@ static file class Initializer
 
 ---
 
+## 🧪 7. Examples
+
+| Example | What it shows |
+|---|---|
+| [CleanArchitecture](examples/CleanArchitecture) | Real-world AutoMapper 16 → FusionMapper migration of Jason Taylor's Clean Architecture template: DI registration and 3 profiles deleted, EF `ProjectTo` → `Project().To<>()` |
+
+---
+
 ## 🤝 Contributing & License
 
 FusionMapper is open-source and licensed under the **MIT License**. Contributions, bug reports, and feature requests are welcome!
 
-*Built with ❤️ using Qwen, .NET 10, C# 14, and tested with TUnit.*
+*Built with ❤️ using Qwen, Claude, .NET 10, C# 14, and tested with TUnit.*
