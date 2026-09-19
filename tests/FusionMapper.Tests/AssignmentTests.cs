@@ -284,7 +284,9 @@ public class AssignmentTests
             A = 10
         };
 
+#pragma warning disable FMAP005 // Target members have no matching source members
         var result = source.Map().To(target);
+#pragma warning restore FMAP005 // Target members have no matching source members
 
         await Assert.That(result.A).IsEqualTo(10);
 

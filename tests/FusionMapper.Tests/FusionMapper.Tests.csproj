@@ -8,7 +8,7 @@
 		<LangVersion>latest</LangVersion>
 		<WarningsAsErrors>$(WarningsAsErrors);NU1605;Nullable</WarningsAsErrors>
 		<EmitCompilerGeneratedFiles>true</EmitCompilerGeneratedFiles>
-		<ReportAnalyzer>true</ReportAnalyzer>
+		<ReportAnalyzer>true</ReportAnalyzer>		
 		
 		
 		<EnableFusionMapperInterceptor>true</EnableFusionMapperInterceptor>

@@ -54,7 +54,9 @@ jobs:
 
       - name: Test without interceptors (runtime fallback)
         if: matrix.interceptors == 'false'
-        run: dotnet test tests/FusionMapper.Tests/FusionMapper.Tests.csproj -c Release -p:EnableFusionMapperInterceptor=false
+        run: |
+          dotnet build tests/FusionMapper.Tests/FusionMapper.Tests.csproj -c Release -p:EnableFusionMapperInterceptor=false
+          dotnet test tests/FusionMapper.Tests/FusionMapper.Tests.csproj -c Release --no-build
 
       - name: Upload test results
         if: failure()

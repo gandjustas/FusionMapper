@@ -23,7 +23,9 @@ public class PrivateMemberMappingTests
     public async Task Map_Ignores_Private_And_Protected_Members()
     {
         var source = new SourceWithPrivate();
+#pragma warning disable FMAP005 // Target members have no matching source members
         var result = source.Map().To<TargetWithPrivate>();
+#pragma warning restore FMAP005 // Target members have no matching source members
 
         // Публичное свойство должно быть замаплено
         await Assert.That(result.PublicName).IsEqualTo("Public");

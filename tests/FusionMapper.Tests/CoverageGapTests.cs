@@ -76,7 +76,9 @@ public class CoverageGapTests
             Bad = "text"
         };
 
+#pragma warning disable FMAP005 // Target members have no matching source members
         var result = source.Map().To<SkipImpossibleTarget>();
+#pragma warning restore FMAP005 // Target members have no matching source members
 
         await Assert.That(result.A).IsEqualTo(1);
         await Assert.That(result.Bad).IsEqualTo(0);
@@ -97,7 +99,9 @@ public class CoverageGapTests
             Bad = 7
         };
 
+#pragma warning disable FMAP005 // Target members have no matching source members
         source.Map().To(target);
+#pragma warning restore FMAP005 // Target members have no matching source members
 
         await Assert.That(target.A).IsEqualTo(1);
         await Assert.That(target.Bad).IsEqualTo(7);
@@ -488,7 +492,9 @@ public class CoverageGapTests
             ]
         };
 
+#pragma warning disable FMAP005 // Target members have no matching source members
         source.Map().To(target);
+#pragma warning restore FMAP005 // Target members have no matching source members
 
         await Assert.That(target.A).IsEqualTo(5);
         await Assert.That(target.Items.Count).IsEqualTo(1);

@@ -25,30 +25,12 @@ public sealed class FusionMapperInterceptorGenerator : IIncrementalGenerator
         defaultSeverity: DiagnosticSeverity.Error,
         isEnabledByDefault: true);
 
-    // Runtime-fallback variant: the mapping is resolved at runtime (and throws
-    // MappingException), so a build failure is not justified.
-    public static readonly DiagnosticDescriptor IncompatibleMappingRuleRuntime = new(
-        id: "FMAP001",
-        title: "Cannot generate mapping",
-        messageFormat: "Cannot generate mapping from '{0}' to '{1}': {2}",
-        category: "FusionMapper",
-        defaultSeverity: DiagnosticSeverity.Warning,
-        isEnabledByDefault: true);
-
     public static readonly DiagnosticDescriptor UnsupportedInExpressionTree = new(
         id: "FMAP002",
         title: "Unsupported mapping inside expression tree",
         messageFormat: "Unsupported Map<{0}>().To<{1}>(existing) inside expression tree",
         category: "FusionMapper",
         defaultSeverity: DiagnosticSeverity.Error,
-        isEnabledByDefault: true);
-
-    public static readonly DiagnosticDescriptor UnsupportedInExpressionTreeRuntime = new(
-        id: "FMAP002",
-        title: "Unsupported mapping inside expression tree",
-        messageFormat: "Unsupported Map<{0}>().To<{1}>(existing) inside expression tree",
-        category: "FusionMapper",
-        defaultSeverity: DiagnosticSeverity.Warning,
         isEnabledByDefault: true);
 
     public static readonly DiagnosticDescriptor AnonymousSourceRule = new(
@@ -146,19 +128,18 @@ public sealed class FusionMapperInterceptorGenerator : IIncrementalGenerator
                 return;
             }
 
-            // With interceptors the generator owns the call site, so an impossible
-            // mapping is a compile error. Otherwise it is resolved by the runtime
-            // fallback (and throws MappingException) — only a warning is justified.
-            var descriptor = interceptorsActive
-                ? diagnostic.Descriptor
-                : diagnostic.Descriptor.Id switch
-                {
-                    IncompatibleMappingRuleId => IncompatibleMappingRuleRuntime,
-                    UnsupportedInExpressionTreeRuleId => UnsupportedInExpressionTreeRuntime,
-                    _ => diagnostic.Descriptor,
-                };
+            var effectiveSeverity = interceptorsActive ||
+                diagnostic.Descriptor.Id is not (IncompatibleMappingRuleId or UnsupportedInExpressionTreeRuleId)
+                    ? default(DiagnosticSeverity?)
+                    : DiagnosticSeverity.Warning;
 
-            spc.ReportDiagnostic(Diagnostic.Create(descriptor, diagnostic.Location, diagnostic.MessageArgs.AsImmutableArray().OfType<object>().ToArray()));
+            var messageArgs = diagnostic.MessageArgs.AsImmutableArray().OfType<object>().ToArray();
+            var reported = effectiveSeverity is { } severity
+                ? Diagnostic.Create(diagnostic.Descriptor, diagnostic.Location, severity,
+                    additionalLocations: null, properties: null, messageArgs)
+                : Diagnostic.Create(diagnostic.Descriptor, diagnostic.Location, messageArgs);
+
+            spc.ReportDiagnostic(reported);
         });
 
         var mapped = candidates
